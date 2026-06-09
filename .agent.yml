@@ -37,8 +37,10 @@ file_access:
 tool_approval:
   feature_branch: false
   file_edit: false
+  push_files: false
   create_pr: false
   merge_to_main: false
+  delete_file: true
   destructive_ops: true
 
 # ---------------------------------------------------------------------------
