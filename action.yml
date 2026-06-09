@@ -5,6 +5,7 @@
 #   - uses: Malstrom/giskard@main
 #     with:
 #       framework: dojo
+#       zeroth-ref: v1.0.0   # optional — pin to a tag or SHA
 
 name: giskard
 description: Validate a Malstrom framework repo against zeroth rules
@@ -14,6 +15,10 @@ inputs:
   framework:
     description: Framework name (e.g. dojo, tensho, sudo-hire-me)
     required: true
+  zeroth-ref:
+    description: Git ref (tag, SHA, branch) for zeroth checklist. Default: main.
+    required: false
+    default: main
 
 outputs:
   report-file:
@@ -29,7 +34,11 @@ runs:
 
     - name: Run giskard validator
       shell: bash
-      run: python ${{ github.action_path }}/giskard.py --framework ${{ inputs.framework }} --repo ${{ github.workspace }}
+      run: |
+        python ${{ github.action_path }}/giskard.py \
+          --framework ${{ inputs.framework }} \
+          --repo ${{ github.workspace }} \
+          --zeroth-ref ${{ inputs.zeroth-ref }}
 
     - name: Upload giskard report
       if: always()
