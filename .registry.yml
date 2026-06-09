@@ -1,0 +1,28 @@
+# .registry.yml
+# Cross-repo connection map for giskard.
+# Read-only for the AI.
+
+framework: giskard
+version: 0.1.0
+description: framework validator for the Malstrom ecosystem
+
+connections:
+  - repo: Malstrom/zeroth
+    role: source of truth for rules and checklists
+    sync_trigger: []
+    access: read
+
+  - repo: Malstrom/dojo
+    role: primary validation target
+    sync_trigger: []
+    access: read
+
+  - repo: Malstrom/tensho
+    role: validation target
+    sync_trigger: []
+    access: read
+
+  - repo: Malstrom/sudo-hire-me
+    role: validation target
+    sync_trigger: []
+    access: read

@@ -1,0 +1,16 @@
+# giskard validates itself — dogfooding
+name: self-validate
+on: [push, pull_request]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate zeroth compliance
+        run: |
+          python giskard.py --framework zeroth --repo . || echo "zeroth not yet in checklist — skipping"

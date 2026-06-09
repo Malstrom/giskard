@@ -1,0 +1,132 @@
+# .agent.yml
+# AI-only operational manifest. Not for humans.
+# Read this at the start of every session. Single entry point.
+# Spec: github.com/Malstrom/zeroth
+
+# ---------------------------------------------------------------------------
+# CONNECTOR CHECK
+# ---------------------------------------------------------------------------
+connector_check:
+  on_fail: |
+    Say: "GitHub connector not active. Click + → GitHub → new chat."
+    Stop immediately. Do not fall back to web or browser.
+
+# ---------------------------------------------------------------------------
+# GLOBAL
+# ---------------------------------------------------------------------------
+global:
+  language: Italian
+  replies_in: Italian
+  pr_strategy: batch_per_session
+  trigger_matching: pattern_first
+
+# ---------------------------------------------------------------------------
+# FILE ACCESS
+# ---------------------------------------------------------------------------
+file_access:
+  .agent.yml: read-only
+  .registry.yml: read-only
+  giskard.py: read-write
+  checks/: read-write
+  action.yml: read-write
+  README.md: read-write
+
+# ---------------------------------------------------------------------------
+# TOOL APPROVAL
+# ---------------------------------------------------------------------------
+tool_approval:
+  feature_branch: false
+  file_edit: false
+  create_pr: false
+  merge_to_main: false
+  destructive_ops: true
+
+# ---------------------------------------------------------------------------
+# WRITE-AHEAD
+# ---------------------------------------------------------------------------
+write_ahead:
+  rule: commit before responding
+  note: never push directly to main — always feature branch → PR
+
+# ---------------------------------------------------------------------------
+# POST-ACTION HOOK
+# ---------------------------------------------------------------------------
+post_action_hook:
+  after_every_state_change:
+    - read: .registry.yml
+    - execute: matching sync triggers
+    - approval_required: false
+  conflict_check:
+    if_open_pr_on_same_file: stop and notify Igor
+
+# ---------------------------------------------------------------------------
+# REPO MAP
+# ---------------------------------------------------------------------------
+repo_map:
+  giskard.py: main validator script — CLI entry point
+  checks/: one check module per rule category (structure, agent, naming)
+  action.yml: GitHub Action definition
+  README.md: usage instructions and registered frameworks
+
+# ---------------------------------------------------------------------------
+# SCENARIOS
+# ---------------------------------------------------------------------------
+scenarios:
+
+  session_start:
+    trigger_patterns:
+      - session opens (automatic, no user message required)
+    read: [giskard.py, checks/]
+    actions:
+      - reply in Italian
+      - summarise current state of giskard (checks implemented, frameworks supported)
+      - propose next action
+    state_changes: []
+
+  add_check:
+    trigger_patterns:
+      - "aggiungi check per {rule}"
+      - "implementa la validazione di {rule}"
+      - "nuovo check {name}"
+    read: [checks/, giskard.py]
+    actions:
+      - read zeroth/frameworks/{framework}/checklist.yml for reference
+      - create or update checks/{name}.py
+      - register check in giskard.py
+      - feature branch → commit → PR
+    state_changes: [check-added]
+
+  add_framework_support:
+    trigger_patterns:
+      - "supporta il framework {name}"
+      - "aggiungi {name} a giskard"
+      - "valida anche {name}"
+    read: [giskard.py]
+    actions:
+      - read zeroth/frameworks/{name}/checklist.yml
+      - add framework entry in giskard.py
+      - update README.md registered frameworks table
+      - feature branch → commit → PR
+    state_changes: [framework-added]
+
+  unknown_scenario:
+    trigger_patterns:
+      - any message that does not match any other scenario
+    actions:
+      - attempt to map message to closest existing scenario and ask for confirmation
+      - if no match: say "Scenario not defined. Want me to add it?"
+      - if user confirms: draft new scenario block + update .agent.yml → batch PR
+    state_changes: []
+
+# ---------------------------------------------------------------------------
+# HANDLERS
+# ---------------------------------------------------------------------------
+handlers:
+
+  readme_sync:
+    listen: [framework-added, check-added]
+    dedup: once per session
+    actions:
+      - update README.md if needed
+      - batch PR
+    state_changes: []

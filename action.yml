@@ -1,0 +1,27 @@
+# GitHub Action definition for giskard
+# Use this in your framework repo to validate on every push/PR
+#
+# Example usage in .github/workflows/validate.yml:
+#   - uses: Malstrom/giskard@main
+#     with:
+#       framework: dojo
+
+name: giskard
+description: Validate a Malstrom framework repo against zeroth rules
+author: Malstrom
+
+inputs:
+  framework:
+    description: Framework name to validate against (e.g. dojo, tensho, sudo-hire-me)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install dependencies
+      shell: bash
+      run: pip install pyyaml
+
+    - name: Run giskard validator
+      shell: bash
+      run: python ${{ github.action_path }}/giskard.py --framework ${{ inputs.framework }} --repo ${{ github.workspace }}
