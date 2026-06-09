@@ -8,7 +8,6 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 import yaml
 from pathlib import Path
@@ -17,6 +16,18 @@ ZEROTH_CHECKLISTS = {
     "dojo": "https://raw.githubusercontent.com/Malstrom/zeroth/main/frameworks/dojo/checklist.yml",
     "tensho": "https://raw.githubusercontent.com/Malstrom/zeroth/main/frameworks/tensho/checklist.yml",
     "sudo-hire-me": "https://raw.githubusercontent.com/Malstrom/zeroth/main/frameworks/sudo-hire-me/checklist.yml",
+}
+
+# Required templates per framework — used when checklist says "all required templates"
+REQUIRED_TEMPLATES = {
+    "dojo": [
+        "kata.md",
+        "scroll.md",
+        "log_exam.md",
+        "log_randori.md",
+        "log_study.md",
+        "randori.html",
+    ]
 }
 
 
@@ -31,19 +42,26 @@ def load_checklist(framework: str) -> dict:
         return yaml.safe_load(response.read().decode())
 
 
-def check_structure(repo: Path, items: list) -> list[tuple[str, bool]]:
+def check_structure(repo: Path, items: list, framework: str) -> list[tuple[str, bool | None]]:
     results = []
     for item in items:
         if "exists in root" in item:
-            # simple file or dir in root
             name = item.split(" exists in root")[0].strip()
-            exists = (repo / name).exists()
-            results.append((item, exists))
+            results.append((item, (repo / name).exists()))
+
+        elif "exists with all required templates" in item:
+            dirname = item.split(" exists with")[0].strip().rstrip("/")
+            dir_path = repo / dirname
+            if not dir_path.is_dir():
+                results.append((item, False))
+                continue
+            required = REQUIRED_TEMPLATES.get(framework, [])
+            missing = [f for f in required if not (dir_path / f).exists()]
+            if missing:
+                print(f"    missing: {', '.join(missing)}")
+            results.append((item, len(missing) == 0))
 
         elif "exists with" in item:
-            # dir exists and contains specific files
-            # e.g. "kata/ exists with .agent.yml"
-            # e.g. "scroll/ exists with .agent.yml and README.md"
             parts = item.split(" exists with ")
             dirname = parts[0].strip().rstrip("/")
             dir_path = repo / dirname
@@ -58,18 +76,13 @@ def check_structure(repo: Path, items: list) -> list[tuple[str, bool]]:
             dirname = item.split(" directory exists")[0].strip().rstrip("/")
             results.append((item, (repo / dirname).is_dir()))
 
-        elif "/" in item and "exists" in item:
-            # nested path: e.g. "onboarding/.agent.yml exists in root"
-            # already handled above via "exists in root" but catch other forms
-            path_str = item.split(" exists")[0].strip()
-            results.append((item, (repo / path_str).exists()))
-
         else:
             results.append((item, None))
+
     return results
 
 
-def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool]]:
+def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool | None]]:
     agent_path = repo / ".agent.yml"
     if not agent_path.exists():
         return [(item, False) for item in items]
@@ -79,7 +92,11 @@ def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool]]:
 
     try:
         parsed = yaml.safe_load(content)
-    except yaml.YAMLError:
+    except yaml.YAMLError as e:
+        print(f"    [giskard] WARN: .agent.yml parse error: {e}")
+        parsed = {}
+
+    if not isinstance(parsed, dict):
         parsed = {}
 
     results = []
@@ -99,7 +116,6 @@ def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool]]:
             results.append((item, passed))
 
         elif "write_ahead.exam_mode is defined" in item:
-            # check nested key: write_ahead block must contain exam_mode
             passed = "exam_mode" in content and "write_ahead" in content
             results.append((item, passed))
 
@@ -108,14 +124,18 @@ def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool]]:
             results.append((item, passed))
 
         elif "all 6 required scenarios are present" in item:
-            scenarios_block = parsed.get("scenarios", {}) if parsed else {}
-            passed = isinstance(scenarios_block, dict) and len(scenarios_block) >= 6
-            results.append((item, passed))
+            scenarios = parsed.get("scenarios", {})
+            count = len(scenarios) if isinstance(scenarios, dict) else 0
+            if count != 6:
+                print(f"    found {count} scenarios, expected 6: {list(scenarios.keys()) if scenarios else []}")
+            results.append((item, count >= 6))
 
         elif "all 3 required handlers are present" in item:
-            handlers_block = parsed.get("handlers", {}) if parsed else {}
-            passed = isinstance(handlers_block, dict) and len(handlers_block) >= 3
-            results.append((item, passed))
+            handlers = parsed.get("handlers", {})
+            count = len(handlers) if isinstance(handlers, dict) else 0
+            if count != 3:
+                print(f"    found {count} handlers, expected 3: {list(handlers.keys()) if handlers else []}")
+            results.append((item, count >= 3))
 
         elif "template_rule mapping covers all required templates" in item:
             passed = "template_rule" in content and "templates/" in content
@@ -144,7 +164,7 @@ def run(framework: str, repo_path: str):
     for section, items in checklist.items():
         print(f"\n\u2502 {section}")
         if section == "structure":
-            results = check_structure(repo, items)
+            results = check_structure(repo, items, framework)
         elif section == "agent_yml":
             results = check_agent_yml(repo, items)
         else:
