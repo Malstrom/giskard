@@ -10,16 +10,25 @@ Usage:
   python giskard.py --framework tensho --repo /path/to/repo
   python giskard.py --framework dojo --repo /path/to/repo --zeroth-ref v1.2.0
   python giskard.py --framework dojo --repo /path/to/repo --zeroth-ref abc1234
+
+Exit codes:
+  0  all checks passed
+  1  one or more checks FAILED (repo non-compliant)
+  2  one or more checks ERRORed (validator itself broke)
 """
 
 import argparse
 import re
 import sys
+import traceback
 import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
 ZEROTH_BASE_TEMPLATE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
+
+# Sentinel for proxy execution errors (distinct from False = check failed)
+ERROR = "error"
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +287,6 @@ def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
     all_modes = {k: v for k, v in fa.items() if isinstance(v, list)}
     if all_modes:
         in_correct = pattern in (all_modes.get(mode) or [])
-        # Only fail if pattern appears in write (destructive), not if it's also in read
         in_write = pattern in (all_modes.get("write") or [])
         if not in_correct:
             print(f"    '{pattern}' not found in file_access.{mode}")
@@ -337,12 +345,16 @@ class Report:
         self.passed = 0
         self.failed = 0
         self.skipped = 0
+        self.errored = 0
         self.ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     def add(self, label: str, result, note: str = ""):
         if result is True:
             self.passed += 1
             icon = "✅"
+        elif result is ERROR:
+            self.errored += 1
+            icon = "💥"
         elif result is False:
             self.failed += 1
             icon = "❌"
@@ -361,7 +373,12 @@ class Report:
 
     def save(self):
         out = self.repo / "giskard-report.md"
-        status = "✅ passed" if self.failed == 0 else "❌ failed"
+        if self.errored > 0:
+            status = "💥 error"
+        elif self.failed > 0:
+            status = "❌ failed"
+        else:
+            status = "✅ passed"
         header = [
             "# giskard report",
             "",
@@ -369,7 +386,7 @@ class Report:
             f"- **repo**: {self.repo.name}",
             f"- **zeroth-ref**: {self.zeroth_ref}",
             f"- **date**: {self.ts}",
-            f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped",
+            f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped / {self.errored} errored",
             "",
             "## checks",
             "",
@@ -394,7 +411,8 @@ def run_check(repo: Path, check: dict, report: Report):
         result, note = fn(repo, check)
         report.add(label, result, note)
     except Exception as e:
-        report.add(label, False, f"exception: {e}")
+        tb = traceback.format_exc().strip().splitlines()[-1]
+        report.add(label, ERROR, f"{tb}")
 
 
 def run_section(repo: Path, section_name: str, checks, report: Report):
@@ -431,9 +449,11 @@ def run(framework: str, repo_path: str, zeroth_ref: str = "main"):
     for section_name, checks in checklist.items():
         run_section(repo, section_name, checks, report)
 
-    print(f"\n[giskard] result: {report.passed} passed / {report.failed} failed / {report.skipped} skipped")
+    print(f"\n[giskard] result: {report.passed} passed / {report.failed} failed / {report.skipped} skipped / {report.errored} errored")
     report.save()
 
+    if report.errored > 0:
+        sys.exit(2)
     if report.failed > 0:
         sys.exit(1)
 
