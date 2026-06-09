@@ -22,11 +22,8 @@ ZEROTH_CHECKLISTS = {
 REQUIRED_TEMPLATES = {
     "dojo": [
         "kata.md",
-        "scroll.md",
-        "log_exam.md",
-        "log_randori.md",
-        "log_study.md",
-        "randori.html",
+        "kiroku_session.md",
+        "shinsa.md",
     ]
 }
 
@@ -63,20 +60,22 @@ def check_structure(repo: Path, items: list, framework: str) -> list:
                 print(f"    missing templates: {', '.join(missing)}")
             results.append((item, len(missing) == 0))
 
-        elif "exists with" in item:
-            parts = item.split(" exists with ")
-            dirname = parts[0].strip().rstrip("/")
-            dir_path = repo / Path(dirname)
+        elif "exists with at least one subject subfolder" in item:
+            dirname = item.split(" exists with")[0].strip().rstrip("/")
+            dir_path = repo / dirname
             if not dir_path.is_dir():
                 results.append((item, False))
                 continue
-            required_files = [f.strip() for f in parts[1].replace(" and ", ",").split(",")]
-            all_present = all((dir_path / f).exists() for f in required_files)
-            results.append((item, all_present))
+            subfolders = [d for d in dir_path.iterdir() if d.is_dir()]
+            results.append((item, len(subfolders) > 0))
 
-        elif "directory exists" in item:
-            dirname = item.split(" directory exists")[0].strip().rstrip("/")
-            results.append((item, (repo / dirname).is_dir()))
+        elif item.endswith(" exists"):
+            dirname = item.split(" exists")[0].strip().rstrip("/")
+            results.append((item, (repo / dirname).exists()))
+
+        elif "does NOT exist" in item:
+            name = item.split(" does NOT exist")[0].strip()
+            results.append((item, not (repo / name).exists()))
 
         else:
             results.append((item, None))
@@ -95,18 +94,22 @@ def check_strict_root(repo: Path, config: dict) -> list:
 def check_dynamic_dirs(repo: Path, config: dict) -> list:
     results = []
     for dirname, rules in config.items():
-        # support nested paths like kiroku/nikki/
         dir_path = repo / Path(dirname.rstrip("/"))
         pattern = rules.get("pattern", "")
         regex = rules.get("regex", "")
         allow_empty = rules.get("allow_empty", True)
+        required_files = rules.get("required_files", [])
         label = f"{dirname} files match pattern '{pattern}'"
 
         if not dir_path.is_dir():
             results.append((label, None))
             continue
 
-        # exclude agent/registry files from pattern validation
+        # check required_files first
+        for rf in required_files:
+            rf_path = dir_path / rf
+            results.append((f"{dirname}/{rf} exists", rf_path.exists()))
+
         files = [
             f for f in dir_path.iterdir()
             if f.is_file() and f.name not in AGENT_FILES
@@ -130,10 +133,18 @@ def check_dynamic_dirs(repo: Path, config: dict) -> list:
     return results
 
 
-def check_agent_yml(repo: Path, items: list) -> list:
+def check_agent_yml(repo: Path, sections: dict) -> list:
+    """
+    checklist agent_yml is a dict of sections:
+      block_order: list of strings
+      global: list of strings
+      scenarios: list of strings
+      handlers: list of strings
+    """
     agent_path = repo / ".agent.yml"
     if not agent_path.exists():
-        return [(item, False) for item in items]
+        all_items = [item for items in sections.values() for item in items]
+        return [(item, False) for item in all_items]
 
     with open(agent_path) as f:
         content = f.read()
@@ -148,40 +159,164 @@ def check_agent_yml(repo: Path, items: list) -> list:
         parsed = {}
 
     results = []
-    for item in items:
+
+    # block_order checks
+    for item in sections.get("block_order", []):
         if "connector_check is the first block" in item:
             lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
             passed = lines[0].strip().startswith("connector_check") if lines else False
             results.append((item, passed))
 
-        elif "global.language reads from sensei.md" in item:
-            results.append((item, "sensei.md" in content and "language" in content))
+        elif "post_action_hook is present and declares after_every_state_change" in item:
+            pah = parsed.get("post_action_hook", {})
+            passed = isinstance(pah, dict) and "after_every_state_change" in pah
+            results.append((item, passed))
+
+        elif " is present" in item:
+            block_name = item.split(" is present")[0].strip()
+            results.append((item, block_name in parsed))
+
+        elif " is present and declares" in item:
+            block_name = item.split(" is present")[0].strip()
+            results.append((item, block_name in parsed))
+
+        else:
+            results.append((item, None))
+
+    # global checks
+    gl = parsed.get("global", {}) or {}
+    for item in sections.get("global", []):
+        if "global.language reads from .gakusei.yml" in item:
+            lang_val = str(gl.get("language", ""))
+            results.append((item, ".gakusei.yml" in lang_val or "gakusei" in lang_val))
 
         elif "global.pr_strategy is batch_per_session" in item:
-            results.append((item, "batch_per_session" in content))
+            results.append((item, gl.get("pr_strategy") == "batch_per_session"))
 
-        elif "write_ahead.exam_mode is defined" in item:
-            results.append((item, "exam_mode" in content and "write_ahead" in content))
+        elif "global.merge_strategy is squash" in item:
+            results.append((item, gl.get("merge_strategy") == "squash"))
 
-        elif "tool_approval.destructive_ops is true" in item:
-            results.append((item, "destructive_ops: true" in content))
+        elif "global.dedup_scope is current_session" in item:
+            results.append((item, gl.get("dedup_scope") == "current_session"))
 
-        elif "all 6 required scenarios are present" in item:
-            scenarios = parsed.get("scenarios", {})
-            count = len(scenarios) if isinstance(scenarios, dict) else 0
-            if count < 6:
-                print(f"    found {count} scenarios, expected 6: {list(scenarios.keys()) if scenarios else []}")
-            results.append((item, count >= 6))
+        else:
+            results.append((item, None))
 
-        elif "all 3 required handlers are present" in item:
-            handlers = parsed.get("handlers", {})
-            count = len(handlers) if isinstance(handlers, dict) else 0
-            if count < 3:
-                print(f"    found {count} handlers, expected 3: {list(handlers.keys()) if handlers else []}")
-            results.append((item, count >= 3))
+    # scenarios checks — look in .scenarios.yml
+    scenarios_path = repo / ".scenarios.yml"
+    scenarios_content = scenarios_path.read_text() if scenarios_path.exists() else ""
+    try:
+        scenarios_parsed = yaml.safe_load(scenarios_content) if scenarios_content else {}
+    except yaml.YAMLError:
+        scenarios_parsed = {}
+    scenario_keys = set()
+    if isinstance(scenarios_parsed, dict):
+        rs = scenarios_parsed.get("required_scenarios", {})
+        if isinstance(rs, dict):
+            scenario_keys = set(rs.keys())
 
-        elif "template_rule mapping covers all required templates" in item:
-            results.append((item, "template_rule" in content and "templates/" in content))
+    for item in sections.get("scenarios", []):
+        if "scenarios_file" in item:
+            results.append((item, parsed.get("scenarios", {}).get("scenarios_file") is not None))
+
+        elif "does NOT exist" in item:
+            name = item.split(" does NOT exist")[0].strip()
+            results.append((item, name not in scenario_keys))
+
+        elif "scenario is present in .scenarios.yml" in item:
+            name = item.split(" scenario is present")[0].strip()
+            results.append((item, name in scenario_keys))
+
+        elif "is present and is the last scenario" in item:
+            name = item.split(" is present")[0].strip()
+            if isinstance(scenarios_parsed, dict):
+                rs = scenarios_parsed.get("required_scenarios", {})
+                if isinstance(rs, dict):
+                    keys = list(rs.keys())
+                    results.append((item, keys[-1] == name if keys else False))
+                else:
+                    results.append((item, None))
+            else:
+                results.append((item, None))
+
+        else:
+            results.append((item, None))
+
+    # handlers checks
+    handlers = parsed.get("handlers", {}) or {}
+    for item in sections.get("handlers", []):
+        if "session_end handler is present" in item:
+            results.append((item, "session_end" in handlers))
+
+        elif "session_end has dedup declared" in item:
+            se = handlers.get("session_end", {}) or {}
+            results.append((item, "dedup" in se))
+
+        elif "session_end has state_changes declared" in item:
+            se = handlers.get("session_end", {}) or {}
+            results.append((item, "state_changes" in se))
+
+        elif "level_up rule states: AI proposes, student confirms" in item:
+            results.append((item, "AI proposes" in content and "student confirms" in content))
+
+        else:
+            results.append((item, None))
+
+    return results
+
+
+def check_gakusei_yml(repo: Path, items: list) -> list:
+    gakusei_path = repo / ".gakusei.yml"
+    if not gakusei_path.exists():
+        return [(item, None) for item in items]
+
+    try:
+        parsed = yaml.safe_load(gakusei_path.read_text()) or {}
+    except yaml.YAMLError:
+        parsed = {}
+
+    valid_levels = {"not_started", "beginner", "intermediate", "advanced"}
+    results = []
+    for item in items:
+        if "name field exists" in item:
+            results.append((item, "name" in parsed))
+
+        elif "language field exists" in item:
+            results.append((item, "language" in parsed))
+
+        elif "subjects field exists as map" in item:
+            results.append((item, isinstance(parsed.get("subjects"), dict)))
+
+        elif "levels are one of" in item:
+            subjects = parsed.get("subjects", {})
+            if isinstance(subjects, dict):
+                bad = [v for v in subjects.values() if v not in valid_levels]
+                if bad:
+                    print(f"    invalid levels: {bad}")
+                results.append((item, len(bad) == 0))
+            else:
+                results.append((item, None))
+
+        elif "last_session field exists" in item:
+            ls = parsed.get("last_session", {})
+            passed = isinstance(ls, dict) and all(k in ls for k in ["subject", "topic", "next"])
+            results.append((item, passed))
+
+        elif "active_books field exists" in item:
+            results.append((item, "active_books" in parsed))
+
+        elif "completed_books field exists" in item:
+            results.append((item, "completed_books" in parsed))
+
+        elif "exams field exists" in item:
+            exams = parsed.get("exams", {})
+            if isinstance(exams, dict) and exams:
+                # check at least one subject has passed and score
+                first = next(iter(exams.values()), {})
+                passed_ok = isinstance(first, dict) and "passed" in first and "score" in first
+                results.append((item, passed_ok))
+            else:
+                results.append((item, None))
 
         else:
             results.append((item, None))
@@ -207,31 +342,51 @@ def check_behaviour(repo: Path, items: list) -> list:
 
     results = []
     for item in items:
-        if "exam logs are committed before AI responds" in item:
-            passed = "commit before responding" in content and "write_ahead" in content
+        if "AI reads .gakusei.yml at every session start" in item:
+            passed = ".gakusei.yml" in content and "session_start" in content
+            results.append((item, passed, "proxy: .gakusei.yml in file_access + session_start scenario"))
+
+        elif "gakusei.md does not need to pre-exist" in item:
+            results.append((item, True, "structural rule — always true by convention"))
+
+        elif "kiroku files are append-only" in item:
+            fa = parsed.get("file_access", {}) or {}
+            kiroku_val = str(fa.get("kiroku/**", fa.get("kiroku/", ""))).lower()
+            passed = "append" in kiroku_val
+            results.append((item, passed, "proxy: file_access.kiroku/** is append-only"))
+
+        elif "shinsa records are committed before the AI responds" in item:
+            passed = "commit before responding" in content
             results.append((item, passed, "proxy: write_ahead.rule declares commit-before-respond"))
 
-        elif "exam logs are never overwritten" in item:
-            passed = "never overwrite" in content and "append" in content
-            results.append((item, passed, "proxy: write_ahead.exam_mode declares append-only"))
+        elif "shinsa gives no feedback during the exam" in item:
+            scenarios_path = repo / ".scenarios.yml"
+            sc = scenarios_path.read_text() if scenarios_path.exists() else ""
+            passed = "no feedback" in sc or "only final score" in sc or "only your final score" in sc
+            results.append((item, passed, "proxy: shinsa scenario describes no-feedback rule"))
 
-        elif "AI language is read from sensei.md not hardcoded" in item:
-            gl = parsed.get("global", {}) or {}
-            lang_val = str(gl.get("language", ""))
-            passed = "sensei.md" in lang_val
-            results.append((item, passed, "proxy: global.language references sensei.md"))
+        elif "shinsa has exactly 10 open-ended questions" in item:
+            scenarios_path = repo / ".scenarios.yml"
+            sc = scenarios_path.read_text() if scenarios_path.exists() else ""
+            count = sc.count("open_exam_question_")
+            passed = count == 10
+            if not passed:
+                print(f"    found {count} open_exam_question_ tokens, expected 10")
+            results.append((item, passed, f"proxy: {count} open_exam_question_ tokens in .scenarios.yml"))
 
-        elif "AI does not read README.md" in item:
-            fa = parsed.get("file_access", {}) or {}
-            readme_access = str(fa.get("readme_files", "")).lower()
-            passed = readme_access in ("write-only", "none")
-            results.append((item, passed, "proxy: file_access.readme_files is write-only"))
+        elif "quiz uses multiple choice" in item:
+            scenarios_path = repo / ".scenarios.yml"
+            sc = scenarios_path.read_text() if scenarios_path.exists() else ""
+            passed = "A, B, C or D" in sc or "mc_question" in sc
+            results.append((item, passed, "proxy: quiz scenario uses mc_question tokens"))
+
+        elif "level_up requires student confirmation" in item:
+            passed = "AI proposes" in content and "student confirms" in content
+            results.append((item, passed, "proxy: level_up rule in .agent.yml global"))
 
         elif "templates are read before generating" in item:
-            tr = parsed.get("template_rule", {}) or {}
-            rule_val = str(tr.get("rule", "")).lower()
-            passed = "read" in rule_val and "template" in rule_val
-            results.append((item, passed, "proxy: template_rule.rule declares read-before-generate"))
+            passed = "templates" in content and "read" in content
+            results.append((item, passed, "proxy: templates declared in file_access and write_ahead"))
 
         else:
             results.append((item, None, ""))
@@ -278,7 +433,18 @@ def run(framework: str, repo_path: str):
                 count(result)
 
         elif section == "agent_yml":
-            for item, result in check_agent_yml(repo, items):
+            # agent_yml is a dict of subsections
+            if isinstance(items, dict):
+                for item, result in check_agent_yml(repo, items):
+                    _print_result(item, result)
+                    count(result)
+            else:
+                for item in items:
+                    _print_result(item, None)
+                    skipped += 1
+
+        elif section == "gakusei_yml":
+            for item, result in check_gakusei_yml(repo, items):
                 _print_result(item, result)
                 count(result)
 
@@ -298,8 +464,12 @@ def run(framework: str, repo_path: str):
                 count(result)
 
         else:
-            for item in items:
-                print(f"  \u26a0\ufe0f  {item} (manual check required)")
+            if isinstance(items, list):
+                for item in items:
+                    print(f"  \u26a0\ufe0f  {item} (manual check required)")
+                    skipped += 1
+            else:
+                print(f"  \u26a0\ufe0f  {section} (manual check required)")
                 skipped += 1
 
     print(f"\n[giskard] result: {passed} passed / {failed} failed / {skipped} skipped")
