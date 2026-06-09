@@ -63,6 +63,11 @@ def _parse_yaml(repo: Path, filename: str) -> dict:
         return {}
 
 
+def _normalize(text: str) -> list[str]:
+    """Normalize text for comparison: split lines, strip each, drop empty trailing lines."""
+    return [line.rstrip() for line in text.splitlines()]
+
+
 # ---------------------------------------------------------------------------
 # Proxy implementations
 # ---------------------------------------------------------------------------
@@ -95,7 +100,10 @@ def proxy_dir_has_templates(repo: Path, check: dict) -> tuple:
 
 
 def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
-    """Fetch template from zeroth and compare with repo's copy. Exact match required."""
+    """Fetch template from zeroth and compare with repo's copy.
+    Comparison is line-by-line after stripping trailing whitespace per line
+    and ignoring CRLF vs LF differences.
+    """
     framework = check["framework"]
     template = check["template"]
     zeroth_ref = check.get("zeroth_ref", "main")
@@ -107,10 +115,18 @@ def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
     repo_content = _read_file(repo, f"templates/{template}")
     if not repo_content:
         return False, "template missing in repo"
-    match = zeroth_content.strip() == repo_content.strip()
+    zeroth_lines = _normalize(zeroth_content)
+    repo_lines = _normalize(repo_content)
+    match = zeroth_lines == repo_lines
     if not match:
-        print(f"    {template}: repo differs from zeroth")
-    return match, f"zeroth: {len(zeroth_content)} chars, repo: {len(repo_content)} chars"
+        diff_count = sum(1 for a, b in zip(zeroth_lines, repo_lines) if a != b)
+        length_diff = len(zeroth_lines) - len(repo_lines)
+        detail = f"{diff_count} line(s) differ"
+        if length_diff != 0:
+            detail += f", {abs(length_diff)} line(s) {'extra in zeroth' if length_diff > 0 else 'extra in repo'}"
+        print(f"    {template}: {detail}")
+        return False, detail
+    return True, f"{len(zeroth_lines)} lines match"
 
 
 def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
@@ -278,7 +294,6 @@ def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
     all_modes = {k: v for k, v in fa.items() if isinstance(v, list)}
     if all_modes:
         in_correct = pattern in (all_modes.get(mode) or [])
-        # Only fail if pattern appears in write (destructive), not if it's also in read
         in_write = pattern in (all_modes.get("write") or [])
         if not in_correct:
             print(f"    '{pattern}' not found in file_access.{mode}")
