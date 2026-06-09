@@ -35,6 +35,15 @@ def load_checklist(framework: str) -> dict:
         sys.exit(1)
 
 
+def _fetch_url(url: str) -> str:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url) as r:
+            return r.read().decode()
+    except Exception:
+        return ""
+
+
 def _read_file(repo: Path, filename: str) -> str:
     p = repo / filename
     return p.read_text() if p.exists() else ""
@@ -56,7 +65,6 @@ def _parse_yaml(repo: Path, filename: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def proxy_file_exists(repo: Path, check: dict) -> tuple:
-    """Check that a file or directory exists (or does NOT exist)."""
     target = check["target"]
     must_exist = check.get("must_exist", True)
     path = repo / target
@@ -65,7 +73,6 @@ def proxy_file_exists(repo: Path, check: dict) -> tuple:
 
 
 def proxy_dir_has_subfolders(repo: Path, check: dict) -> tuple:
-    """Check that a directory contains at least one subfolder."""
     target = repo / check["target"].rstrip("/")
     if not target.is_dir():
         return False, ""
@@ -74,7 +81,6 @@ def proxy_dir_has_subfolders(repo: Path, check: dict) -> tuple:
 
 
 def proxy_dir_has_templates(repo: Path, check: dict) -> tuple:
-    """Check that a templates dir contains all required files."""
     target = repo / check["target"].rstrip("/")
     if not target.is_dir():
         return False, ""
@@ -85,15 +91,30 @@ def proxy_dir_has_templates(repo: Path, check: dict) -> tuple:
     return len(missing) == 0, ""
 
 
+def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
+    """Fetch template from zeroth and compare with repo's copy. Exact match required."""
+    framework = check["framework"]
+    template = check["template"]
+    zeroth_url = f"{ZEROTH_BASE}/{framework}/templates/{template}"
+    zeroth_content = _fetch_url(zeroth_url)
+    if not zeroth_content:
+        return None, f"could not fetch {zeroth_url}"
+    repo_content = _read_file(repo, f"templates/{template}")
+    if not repo_content:
+        return False, "template missing in repo"
+    match = zeroth_content.strip() == repo_content.strip()
+    if not match:
+        print(f"    {template}: repo differs from zeroth")
+    return match, f"zeroth: {len(zeroth_content)} chars, repo: {len(repo_content)} chars"
+
+
 def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
-    """Check that a top-level key exists in a YAML file."""
     parsed = _parse_yaml(repo, check["file"])
     key = check["key"]
     return key in parsed, ""
 
 
 def proxy_yaml_key_equals(repo: Path, check: dict) -> tuple:
-    """Check that a nested key equals an expected value."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -106,7 +127,6 @@ def proxy_yaml_key_equals(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_key_contains(repo: Path, check: dict) -> tuple:
-    """Check that a nested key value contains a substring."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -119,7 +139,6 @@ def proxy_yaml_key_contains(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_first_key(repo: Path, check: dict) -> tuple:
-    """Check that the first non-comment key in a YAML file matches expected."""
     content = _read_file(repo, check["file"])
     lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
     first_key = lines[0].split(":")[0].strip() if lines else ""
@@ -128,7 +147,6 @@ def proxy_yaml_first_key(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_levels_valid(repo: Path, check: dict) -> tuple:
-    """Check that all values in a map field are within an allowed set."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -144,7 +162,6 @@ def proxy_yaml_levels_valid(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_subkeys_exist(repo: Path, check: dict) -> tuple:
-    """Check that a nested map key exists and contains all required subkeys."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -162,7 +179,6 @@ def proxy_yaml_subkeys_exist(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_present(repo: Path, check: dict) -> tuple:
-    """Check that a scenario key exists in .scenarios.yml required_scenarios."""
     sc = _parse_yaml(repo, ".scenarios.yml")
     rs = sc.get("required_scenarios", {})
     name = check["scenario"]
@@ -171,7 +187,6 @@ def proxy_scenario_present(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_last(repo: Path, check: dict) -> tuple:
-    """Check that a scenario is the last key in required_scenarios."""
     sc = _parse_yaml(repo, ".scenarios.yml")
     rs = sc.get("required_scenarios", {}) or {}
     name = check["scenario"]
@@ -181,7 +196,6 @@ def proxy_scenario_last(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_not_present(repo: Path, check: dict) -> tuple:
-    """Check that a scenario key does NOT exist in required_scenarios."""
     sc = _parse_yaml(repo, ".scenarios.yml")
     rs = sc.get("required_scenarios", {}) or {}
     name = check["scenario"]
@@ -189,7 +203,6 @@ def proxy_scenario_not_present(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_input_sources(repo: Path, check: dict) -> tuple:
-    """Check that a scenario declares at least N input_sources."""
     sc = _parse_yaml(repo, ".scenarios.yml")
     rs = sc.get("required_scenarios", {}) or {}
     name = check["scenario"]
@@ -201,7 +214,6 @@ def proxy_scenario_input_sources(repo: Path, check: dict) -> tuple:
 
 
 def proxy_handler_present(repo: Path, check: dict) -> tuple:
-    """Check that a handler key exists in .agent.yml handlers."""
     parsed = _parse_yaml(repo, ".agent.yml")
     h = parsed.get("handlers", {}) or {}
     name = check["handler"]
@@ -209,14 +221,12 @@ def proxy_handler_present(repo: Path, check: dict) -> tuple:
 
 
 def proxy_handler_has_key(repo: Path, check: dict) -> tuple:
-    """Check that a handler block contains a specific key."""
     parsed = _parse_yaml(repo, ".agent.yml")
     h = (parsed.get("handlers", {}) or {}).get(check["handler"], {}) or {}
     return check["key"] in h, ""
 
 
 def proxy_text_search(repo: Path, check: dict) -> tuple:
-    """Check that all required terms appear in a file (raw text search)."""
     content = _read_file(repo, check["file"])
     terms = check["terms"]
     missing = [t for t in terms if t not in content]
@@ -226,7 +236,6 @@ def proxy_text_search(repo: Path, check: dict) -> tuple:
 
 
 def proxy_token_count(repo: Path, check: dict) -> tuple:
-    """Check that a token appears exactly N times in a file."""
     content = _read_file(repo, check["file"])
     token = check["token"]
     count = content.count(token)
@@ -237,7 +246,6 @@ def proxy_token_count(repo: Path, check: dict) -> tuple:
 
 
 def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
-    """Check that a file_access pattern in .agent.yml declares a specific mode."""
     parsed = _parse_yaml(repo, ".agent.yml")
     fa = parsed.get("file_access", {}) or {}
     pattern = check["pattern"]
@@ -247,7 +255,6 @@ def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
 
 
 def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
-    """Check that write_ahead.rule contains a required phrase."""
     content = _read_file(repo, ".agent.yml")
     return check["contains"] in content, ""
 
@@ -260,6 +267,7 @@ PROXY_REGISTRY = {
     "file_exists": proxy_file_exists,
     "dir_has_subfolders": proxy_dir_has_subfolders,
     "dir_has_templates": proxy_dir_has_templates,
+    "template_matches_zeroth": proxy_template_matches_zeroth,
     "yaml_key_exists": proxy_yaml_key_exists,
     "yaml_key_equals": proxy_yaml_key_equals,
     "yaml_key_contains": proxy_yaml_key_contains,
@@ -317,15 +325,15 @@ class Report:
         out = self.repo / "giskard-report.md"
         status = "✅ passed" if self.failed == 0 else "❌ failed"
         header = [
-            f"# giskard report",
-            f"",
+            "# giskard report",
+            "",
             f"- **framework**: {self.framework}",
             f"- **repo**: {self.repo.name}",
             f"- **date**: {self.ts}",
             f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped",
-            f"",
-            f"## checks",
-            f"",
+            "",
+            "## checks",
+            "",
         ]
         with open(out, "w") as f:
             f.write("\n".join(header) + "\n")
