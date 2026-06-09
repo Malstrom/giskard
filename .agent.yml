@@ -18,6 +18,7 @@ global:
   language: Italian
   replies_in: Italian
   pr_strategy: batch_per_session
+  merge_strategy: squash
   trigger_matching: pattern_first
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,11 @@ tool_approval:
 # ---------------------------------------------------------------------------
 write_ahead:
   rule: commit before responding
-  note: never push directly to main — always feature branch → PR
+  branch_strategy: |
+    NEVER push directly to main.
+    Always: feature branch → PR → squash merge.
+    Branch naming: {type}/{short-description}
+    Types: feat, fix, docs, test, chore
 
 # ---------------------------------------------------------------------------
 # POST-ACTION HOOK
@@ -78,7 +83,9 @@ scenarios:
   session_start:
     trigger_patterns:
       - session opens (automatic, no user message required)
-    read: [giskard.py, checks/]
+    read:
+      - giskard.py
+      - checks/
     actions:
       - reply in Italian
       - summarise current state of giskard (checks implemented, frameworks supported)
@@ -90,12 +97,14 @@ scenarios:
       - "aggiungi check per {rule}"
       - "implementa la validazione di {rule}"
       - "nuovo check {name}"
-    read: [checks/, giskard.py]
+    read:
+      - checks/
+      - giskard.py
     actions:
       - read zeroth/frameworks/{framework}/checklist.yml for reference
       - create or update checks/{name}.py
       - register check in giskard.py
-      - feature branch → commit → PR
+      - feature branch → PR → squash merge
     state_changes: [check-added]
 
   add_framework_support:
@@ -103,12 +112,13 @@ scenarios:
       - "supporta il framework {name}"
       - "aggiungi {name} a giskard"
       - "valida anche {name}"
-    read: [giskard.py]
+    read:
+      - giskard.py
     actions:
       - read zeroth/frameworks/{name}/checklist.yml
       - add framework entry in giskard.py
       - update README.md registered frameworks table
-      - feature branch → commit → PR
+      - feature branch → PR → squash merge
     state_changes: [framework-added]
 
   unknown_scenario:
@@ -117,7 +127,7 @@ scenarios:
     actions:
       - attempt to map message to closest existing scenario and ask for confirmation
       - if no match: say "Scenario not defined. Want me to add it?"
-      - if user confirms: draft new scenario block + update .agent.yml → batch PR
+      - if user confirms: draft new scenario block + update .agent.yml → feature branch → PR → squash merge
     state_changes: []
 
 # ---------------------------------------------------------------------------
@@ -130,5 +140,5 @@ handlers:
     dedup: once per session
     actions:
       - update README.md if needed
-      - batch PR
+      - feature branch → PR → squash merge
     state_changes: []
