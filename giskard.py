@@ -246,12 +246,46 @@ def proxy_token_count(repo: Path, check: dict) -> tuple:
 
 
 def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
+    """
+    Supports two file_access structures in .agent.yml:
+
+    1. List-based (preferred):
+       file_access:
+         append:
+           - "kiroku/nikki/**"
+         write:
+           - ...
+
+    2. Flat (legacy):
+       file_access:
+         "kiroku/nikki/**": append-only
+
+    The check passes if:
+    - list-based: pattern is present in file_access[mode] AND absent from all other mode lists
+    - flat: file_access[pattern] value contains mode string
+    """
     parsed = _parse_yaml(repo, ".agent.yml")
     fa = parsed.get("file_access", {}) or {}
     pattern = check["pattern"]
-    mode = check["mode"]
+    mode = check["mode"].lower()
+
+    # --- list-based structure ---
+    # file_access has keys like read/append/write whose values are lists
+    all_modes = {k: v for k, v in fa.items() if isinstance(v, list)}
+    if all_modes:
+        in_correct = pattern in (all_modes.get(mode) or [])
+        other_modes = [m for m in all_modes if m != mode]
+        in_wrong = any(pattern in (all_modes.get(m) or []) for m in other_modes)
+        if not in_correct:
+            print(f"    '{pattern}' not found in file_access.{mode}")
+        if in_wrong:
+            wrong = [m for m in other_modes if pattern in (all_modes.get(m) or [])]
+            print(f"    '{pattern}' also present in: {wrong} — must be {mode}-only")
+        return in_correct and not in_wrong, ""
+
+    # --- flat / legacy structure ---
     val = str(fa.get(pattern, "")).lower()
-    return mode.lower() in val, ""
+    return mode in val, ""
 
 
 def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
