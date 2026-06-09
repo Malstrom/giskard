@@ -12,8 +12,13 @@ author: Malstrom
 
 inputs:
   framework:
-    description: Framework name to validate against (e.g. dojo, tensho, sudo-hire-me)
+    description: Framework name (e.g. dojo, tensho, sudo-hire-me)
     required: true
+
+outputs:
+  report-file:
+    description: Path to the generated giskard-report.md
+    value: ${{ github.workspace }}/giskard-report.md
 
 runs:
   using: composite
@@ -25,3 +30,11 @@ runs:
     - name: Run giskard validator
       shell: bash
       run: python ${{ github.action_path }}/giskard.py --framework ${{ inputs.framework }} --repo ${{ github.workspace }}
+
+    - name: Upload giskard report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: giskard-report
+        path: ${{ github.workspace }}/giskard-report.md
+        if-no-files-found: warn
