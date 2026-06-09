@@ -30,6 +30,9 @@ REQUIRED_TEMPLATES = {
     ]
 }
 
+# Files that are always excluded from dynamic pattern checks
+AGENT_FILES = {".agent.yml", ".registry.yml"}
+
 
 def load_checklist(framework: str) -> dict:
     import urllib.request
@@ -57,13 +60,13 @@ def check_structure(repo: Path, items: list, framework: str) -> list:
             required = REQUIRED_TEMPLATES.get(framework, [])
             missing = [f for f in required if not (dir_path / f).exists()]
             if missing:
-                print(f"    missing: {', '.join(missing)}")
+                print(f"    missing templates: {', '.join(missing)}")
             results.append((item, len(missing) == 0))
 
         elif "exists with" in item:
             parts = item.split(" exists with ")
             dirname = parts[0].strip().rstrip("/")
-            dir_path = repo / dirname
+            dir_path = repo / Path(dirname)
             if not dir_path.is_dir():
                 results.append((item, False))
                 continue
@@ -82,23 +85,18 @@ def check_structure(repo: Path, items: list, framework: str) -> list:
 
 def check_strict_root(repo: Path, config: dict) -> list:
     allowed = set(config.get("allowed", []))
-    results = []
-    violations = []
-    for item in repo.iterdir():
-        if item.name not in allowed:
-            violations.append(item.name)
+    violations = [item.name for item in repo.iterdir() if item.name not in allowed]
     if violations:
-        print(f"    unexpected files/dirs in root: {', '.join(sorted(violations))}")
-        results.append(("no unexpected files in root", False))
-    else:
-        results.append(("no unexpected files in root", True))
-    return results
+        print(f"    unexpected in root: {', '.join(sorted(violations))}")
+        return [("no unexpected files in root", False)]
+    return [("no unexpected files in root", True)]
 
 
 def check_dynamic_dirs(repo: Path, config: dict) -> list:
     results = []
     for dirname, rules in config.items():
-        dir_path = repo / dirname.rstrip("/")
+        # support nested paths like kiroku/nikki/
+        dir_path = repo / Path(dirname.rstrip("/"))
         pattern = rules.get("pattern", "")
         regex = rules.get("regex", "")
         allow_empty = rules.get("allow_empty", True)
@@ -108,7 +106,11 @@ def check_dynamic_dirs(repo: Path, config: dict) -> list:
             results.append((label, None))
             continue
 
-        files = [f for f in dir_path.iterdir() if not f.name.startswith(".") or f.name == ".agent.yml"]
+        # exclude agent/registry files from pattern validation
+        files = [
+            f for f in dir_path.iterdir()
+            if f.is_file() and f.name not in AGENT_FILES
+        ]
 
         if not files:
             results.append((label, True if allow_empty else None))
@@ -118,7 +120,7 @@ def check_dynamic_dirs(repo: Path, config: dict) -> list:
             results.append((label, None))
             continue
 
-        violations = [f.name for f in files if f.is_file() and not re.match(regex, f.name)]
+        violations = [f.name for f in files if not re.match(regex, f.name)]
         if violations:
             print(f"    {dirname} naming violations: {', '.join(sorted(violations))}")
             results.append((label, False))
