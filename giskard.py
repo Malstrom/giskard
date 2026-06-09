@@ -8,6 +8,8 @@ every check using the PROXY_REGISTRY. Zero framework-specific logic here.
 Usage:
   python giskard.py --framework dojo --repo /path/to/repo
   python giskard.py --framework tensho --repo /path/to/repo
+  python giskard.py --framework dojo --repo /path/to/repo --zeroth-ref v1.2.0
+  python giskard.py --framework dojo --repo /path/to/repo --zeroth-ref abc1234
 """
 
 import argparse
@@ -17,21 +19,22 @@ import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
-ZEROTH_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/main/frameworks"
+ZEROTH_BASE_TEMPLATE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
 
 
 # ---------------------------------------------------------------------------
 # Loaders
 # ---------------------------------------------------------------------------
 
-def load_checklist(framework: str) -> dict:
+def load_checklist(framework: str, zeroth_ref: str = "main") -> dict:
     import urllib.request
-    url = f"{ZEROTH_BASE}/{framework}/checklist.yml"
+    base = ZEROTH_BASE_TEMPLATE.format(ref=zeroth_ref)
+    url = f"{base}/{framework}/checklist.yml"
     try:
         with urllib.request.urlopen(url) as r:
             return yaml.safe_load(r.read().decode()) or {}
     except Exception as e:
-        print(f"[giskard] ERROR: cannot load checklist for '{framework}': {e}")
+        print(f"[giskard] ERROR: cannot load checklist for '{framework}' at ref '{zeroth_ref}': {e}")
         sys.exit(1)
 
 
@@ -95,7 +98,9 @@ def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
     """Fetch template from zeroth and compare with repo's copy. Exact match required."""
     framework = check["framework"]
     template = check["template"]
-    zeroth_url = f"{ZEROTH_BASE}/{framework}/templates/{template}"
+    zeroth_ref = check.get("zeroth_ref", "main")
+    base = ZEROTH_BASE_TEMPLATE.format(ref=zeroth_ref)
+    zeroth_url = f"{base}/{framework}/templates/{template}"
     zeroth_content = _fetch_url(zeroth_url)
     if not zeroth_content:
         return None, f"could not fetch {zeroth_url}"
@@ -324,9 +329,10 @@ PROXY_REGISTRY = {
 # ---------------------------------------------------------------------------
 
 class Report:
-    def __init__(self, framework: str, repo: Path):
+    def __init__(self, framework: str, repo: Path, zeroth_ref: str = "main"):
         self.framework = framework
         self.repo = repo
+        self.zeroth_ref = zeroth_ref
         self.lines = []
         self.passed = 0
         self.failed = 0
@@ -361,6 +367,7 @@ class Report:
             "",
             f"- **framework**: {self.framework}",
             f"- **repo**: {self.repo.name}",
+            f"- **zeroth-ref**: {self.zeroth_ref}",
             f"- **date**: {self.ts}",
             f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped",
             "",
@@ -408,17 +415,18 @@ def run_section(repo: Path, section_name: str, checks, report: Report):
                     report.add(str(check), None, "malformed check")
 
 
-def run(framework: str, repo_path: str):
+def run(framework: str, repo_path: str, zeroth_ref: str = "main"):
     repo = Path(repo_path).resolve()
     if not repo.is_dir():
         print(f"[giskard] ERROR: repo path not found: {repo}")
         sys.exit(1)
 
     print(f"[giskard] validating '{repo.name}' as framework: {framework}")
+    print(f"[giskard] zeroth ref: {zeroth_ref}")
     print(f"[giskard] loading checklist from zeroth...")
-    checklist = load_checklist(framework)
+    checklist = load_checklist(framework, zeroth_ref)
 
-    report = Report(framework, repo)
+    report = Report(framework, repo, zeroth_ref)
 
     for section_name, checks in checklist.items():
         run_section(repo, section_name, checks, report)
@@ -434,5 +442,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="giskard — Malstrom framework validator")
     parser.add_argument("--framework", required=True)
     parser.add_argument("--repo", required=True)
+    parser.add_argument(
+        "--zeroth-ref",
+        default="main",
+        dest="zeroth_ref",
+        help="Git ref (tag, SHA, branch) for zeroth checklist. Default: main.",
+    )
     args = parser.parse_args()
-    run(args.framework, args.repo)
+    run(args.framework, args.repo, args.zeroth_ref)
