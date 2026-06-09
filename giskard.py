@@ -34,21 +34,37 @@ def load_checklist(framework: str) -> dict:
 def check_structure(repo: Path, items: list) -> list[tuple[str, bool]]:
     results = []
     for item in items:
-        # parse simple existence checks from checklist strings
         if "exists in root" in item:
-            filename = item.split(" exists in root")[0].strip()
-            exists = (repo / filename).exists()
+            # simple file or dir in root
+            name = item.split(" exists in root")[0].strip()
+            exists = (repo / name).exists()
             results.append((item, exists))
+
         elif "exists with" in item:
-            dirname = item.split(" exists with")[0].strip()
-            exists = (repo / dirname).is_dir()
-            results.append((item, exists))
+            # dir exists and contains specific files
+            # e.g. "kata/ exists with .agent.yml"
+            # e.g. "scroll/ exists with .agent.yml and README.md"
+            parts = item.split(" exists with ")
+            dirname = parts[0].strip().rstrip("/")
+            dir_path = repo / dirname
+            if not dir_path.is_dir():
+                results.append((item, False))
+                continue
+            required_files = [f.strip() for f in parts[1].replace(" and ", ",").split(",")]
+            all_present = all((dir_path / f).exists() for f in required_files)
+            results.append((item, all_present))
+
         elif "directory exists" in item:
-            dirname = item.split(" directory exists")[0].strip()
-            exists = (repo / dirname).is_dir()
-            results.append((item, exists))
+            dirname = item.split(" directory exists")[0].strip().rstrip("/")
+            results.append((item, (repo / dirname).is_dir()))
+
+        elif "/" in item and "exists" in item:
+            # nested path: e.g. "onboarding/.agent.yml exists in root"
+            # already handled above via "exists in root" but catch other forms
+            path_str = item.split(" exists")[0].strip()
+            results.append((item, (repo / path_str).exists()))
+
         else:
-            # unrecognised check format — skip with warning
             results.append((item, None))
     return results
 
@@ -61,23 +77,53 @@ def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool]]:
     with open(agent_path) as f:
         content = f.read()
 
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError:
+        parsed = {}
+
     results = []
     for item in items:
+
         if "connector_check is the first block" in item:
-            # first non-comment non-empty line should be connector_check
             lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
             passed = lines[0].strip().startswith("connector_check") if lines else False
             results.append((item, passed))
-        elif "destructive_ops is true" in item:
+
+        elif "global.language reads from sensei.md" in item:
+            passed = "sensei.md" in content and "language" in content
+            results.append((item, passed))
+
+        elif "global.pr_strategy is batch_per_session" in item:
+            passed = "batch_per_session" in content
+            results.append((item, passed))
+
+        elif "write_ahead.exam_mode is defined" in item:
+            # check nested key: write_ahead block must contain exam_mode
+            passed = "exam_mode" in content and "write_ahead" in content
+            results.append((item, passed))
+
+        elif "tool_approval.destructive_ops is true" in item:
             passed = "destructive_ops: true" in content
             results.append((item, passed))
-        elif "pr_strategy is batch_per_session" in item:
-            passed = "pr_strategy: batch_per_session" in content
+
+        elif "all 6 required scenarios are present" in item:
+            scenarios_block = parsed.get("scenarios", {}) if parsed else {}
+            passed = isinstance(scenarios_block, dict) and len(scenarios_block) >= 6
             results.append((item, passed))
+
+        elif "all 3 required handlers are present" in item:
+            handlers_block = parsed.get("handlers", {}) if parsed else {}
+            passed = isinstance(handlers_block, dict) and len(handlers_block) >= 3
+            results.append((item, passed))
+
+        elif "template_rule mapping covers all required templates" in item:
+            passed = "template_rule" in content and "templates/" in content
+            results.append((item, passed))
+
         else:
-            # generic keyword presence check
-            keyword = item.split(" ")[0]
-            results.append((item, keyword.lower() in content.lower()))
+            results.append((item, None))
+
     return results
 
 
