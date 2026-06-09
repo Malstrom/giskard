@@ -18,7 +18,6 @@ ZEROTH_CHECKLISTS = {
     "sudo-hire-me": "https://raw.githubusercontent.com/Malstrom/zeroth/main/frameworks/sudo-hire-me/checklist.yml",
 }
 
-# Required templates per framework — used when checklist says "all required templates"
 REQUIRED_TEMPLATES = {
     "dojo": [
         "kata.md",
@@ -42,7 +41,7 @@ def load_checklist(framework: str) -> dict:
         return yaml.safe_load(response.read().decode())
 
 
-def check_structure(repo: Path, items: list, framework: str) -> list[tuple[str, bool | None]]:
+def check_structure(repo: Path, items: list, framework: str) -> list:
     results = []
     for item in items:
         if "exists in root" in item:
@@ -82,7 +81,7 @@ def check_structure(repo: Path, items: list, framework: str) -> list[tuple[str, 
     return results
 
 
-def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool | None]]:
+def check_agent_yml(repo: Path, items: list) -> list:
     agent_path = repo / ".agent.yml"
     if not agent_path.exists():
         return [(item, False) for item in items]
@@ -147,6 +146,68 @@ def check_agent_yml(repo: Path, items: list) -> list[tuple[str, bool | None]]:
     return results
 
 
+def check_behaviour(repo: Path, items: list) -> list:
+    """
+    Option C: proxy checks.
+    We cannot observe runtime behaviour, but we verify that the rules
+    governing each behaviour are correctly declared in .agent.yml.
+    A passing proxy check means the instruction is present — not that the AI follows it.
+    """
+    agent_path = repo / ".agent.yml"
+    if not agent_path.exists():
+        return [(item, None) for item in items]
+
+    with open(agent_path) as f:
+        content = f.read()
+
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError:
+        parsed = {}
+
+    if not isinstance(parsed, dict):
+        parsed = {}
+
+    results = []
+    for item in items:
+
+        if "exam logs are committed before AI responds" in item:
+            # proxy: write_ahead.rule = commit before responding
+            passed = "commit before responding" in content and "write_ahead" in content
+            results.append((item, passed, "proxy: write_ahead.rule declares commit-before-respond"))
+
+        elif "exam logs are never overwritten" in item:
+            # proxy: write_ahead.exam_mode.on_self_correction = append, never overwrite
+            passed = "never overwrite" in content and "append" in content
+            results.append((item, passed, "proxy: write_ahead.exam_mode declares append-only"))
+
+        elif "AI language is read from sensei.md not hardcoded" in item:
+            # proxy: global.language = read from sensei.md (not a literal language name)
+            gl = parsed.get("global", {}) or {}
+            lang_val = str(gl.get("language", ""))
+            passed = "sensei.md" in lang_val
+            results.append((item, passed, "proxy: global.language references sensei.md not hardcoded value"))
+
+        elif "AI does not read README.md" in item:
+            # proxy: file_access declares readme_files as write-only or not readable
+            fa = parsed.get("file_access", {}) or {}
+            readme_access = str(fa.get("readme_files", "")).lower()
+            passed = readme_access in ("write-only", "none")
+            results.append((item, passed, "proxy: file_access.readme_files is write-only"))
+
+        elif "templates are read before generating" in item:
+            # proxy: template_rule.rule declares read-before-generate
+            tr = parsed.get("template_rule", {}) or {}
+            rule_val = str(tr.get("rule", "")).lower()
+            passed = "read" in rule_val and "template" in rule_val
+            results.append((item, passed, "proxy: template_rule.rule declares read-before-generate"))
+
+        else:
+            results.append((item, None, ""))
+
+    return results
+
+
 def run(framework: str, repo_path: str):
     repo = Path(repo_path).resolve()
     if not repo.is_dir():
@@ -163,27 +224,54 @@ def run(framework: str, repo_path: str):
 
     for section, items in checklist.items():
         print(f"\n\u2502 {section}")
+
         if section == "structure":
             results = check_structure(repo, items, framework)
+            for item, result in results:
+                _print_result(item, result, "")
+                _count(result, locals())
+                if result is True: passed += 1
+                elif result is False: failed += 1
+                else: skipped += 1
+
         elif section == "agent_yml":
             results = check_agent_yml(repo, items)
-        else:
-            results = [(item, None) for item in items]
+            for item, result in results:
+                _print_result(item, result, "")
+                if result is True: passed += 1
+                elif result is False: failed += 1
+                else: skipped += 1
 
-        for item, result in results:
-            if result is True:
-                print(f"  \u2705 {item}")
-                passed += 1
-            elif result is False:
-                print(f"  \u274c {item}")
-                failed += 1
-            else:
+        elif section == "behaviour":
+            results = check_behaviour(repo, items)
+            for item, result, note in results:
+                _print_result(item, result, note)
+                if result is True: passed += 1
+                elif result is False: failed += 1
+                else: skipped += 1
+
+        else:
+            for item in items:
                 print(f"  \u26a0\ufe0f  {item} (manual check required)")
                 skipped += 1
 
     print(f"\n[giskard] result: {passed} passed / {failed} failed / {skipped} skipped")
     if failed > 0:
         sys.exit(1)
+
+
+def _print_result(item: str, result, note: str):
+    if result is True:
+        suffix = f" — {note}" if note else ""
+        print(f"  \u2705 {item}{suffix}")
+    elif result is False:
+        print(f"  \u274c {item}")
+    else:
+        print(f"  \u26a0\ufe0f  {item} (manual check required)")
+
+
+def _count(result, scope):
+    pass
 
 
 if __name__ == "__main__":
