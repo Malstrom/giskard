@@ -10,19 +10,20 @@ Last updated: 2026-06-11
 Section order (top-down, most general to most specific):
 
   aurora — structure
-    .aurora.yml fields, required dirs, templates present,
-    framework-specific handler (reindex_check)
+    .aurora.yml fields, required dirs (clients/, contacts/, playbooks/, templates/),
+    templates present, framework-specific handler (reindex_check)
+    Note: no top-level log/ dir — logs live in clients/{slug}/log/
 
   aurora — files
     Every generated file contains all root keys of its local template.
     Mapping (glob → template):
-      clients/*/inbox/*.yml      → templates/inbox.yml
-      contacts/*.yml             → templates/contact.yml
-      log/*/*.yml                → templates/log.yml
-      log/_index/*.yml           → templates/log_index.yml
-      clients/*/playbooks/*.yml  → templates/playbook.yml
-      log/*/*_*.yml              → templates/playbook_log.yml
+      clients/*/inbox/*.yml          → templates/inbox.yml
+      contacts/*.yml                 → templates/contact.yml
+      clients/*/log/[0-9]*.yml       → templates/log.yml       (session logs only)
+      clients/*/log/*.index.yml      → templates/log_index.yml  (monthly index)
     Skipped if no generated files exist. No network calls.
+    Note: clients/*/playbooks/*.yml not validated here — client playbooks
+    have a different structure from general playbooks. Covered by aurora — refs.
 
   aurora — refs
     Every reference in every file resolves to something that exists.
@@ -46,6 +47,7 @@ KNOWN GAPS / FUTURE CHECKS
 - output/ file naming convention not yet validated
 - contacts/{slug}.yml internal field structure not yet validated
 - clients/{slug}/context.yml existence not yet validated
+- client playbook key structure not yet validated (needs templates/client_playbook.yml)
 
 ================================================================================
 """
@@ -62,7 +64,6 @@ REQUIRED_TEMPLATES = [
     "contact.yml",
     "client_context.yml",
     "playbook.yml",
-    "playbook_log.yml",
     "output_csv.md",
     "output_email.md",
     "output_report.md",
@@ -88,13 +89,6 @@ STRUCTURE_CHECKS = [
         "proxy": "file_exists",
         "target": "contacts",
         "file": "contacts/",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": "log/ directory not found",
-        "proxy": "file_exists",
-        "target": "log",
-        "file": "log/",
         "rule": "aurora/structure.yml",
     },
     {
@@ -173,29 +167,15 @@ FILE_KEY_CHECKS = [
     {
         "label": "log session files: keys missing vs templates/log.yml",
         "proxy": "generated_files_match_template",
-        "glob": "log/*/*.yml",
+        "glob": "clients/*/log/[0-9]*.yml",
         "template": "templates/log.yml",
         "rule": "aurora/files.yml",
     },
     {
         "label": "log index files: keys missing vs templates/log_index.yml",
         "proxy": "generated_files_match_template",
-        "glob": "log/_index/*.yml",
+        "glob": "clients/*/log/*.index.yml",
         "template": "templates/log_index.yml",
-        "rule": "aurora/files.yml",
-    },
-    {
-        "label": "client playbook files: keys missing vs templates/playbook.yml",
-        "proxy": "generated_files_match_template",
-        "glob": "clients/*/playbooks/*.yml",
-        "template": "templates/playbook.yml",
-        "rule": "aurora/files.yml",
-    },
-    {
-        "label": "playbook log files: keys missing vs templates/playbook_log.yml",
-        "proxy": "generated_files_match_template",
-        "glob": "log/*/*_*.yml",
-        "template": "templates/playbook_log.yml",
         "rule": "aurora/files.yml",
     },
 ]
@@ -219,7 +199,7 @@ def _check_refs(repo: Path, report: Report) -> None:
         - client: {slug}       → clients/{slug}/ must exist          ERROR
         - contact: {slug}      → contacts/{slug}.yml must exist       WARNING
         - assigned_to: {slug}  → contacts/{slug}.yml must exist       WARNING
-        - status != open       → log/{slug}/ must exist               WARNING
+        - status != open       → clients/{slug}/log/ must exist        WARNING
 
       clients/*/playbooks/*.yml
         - extends: {name}      → playbooks/{name}.yml must exist      ERROR
@@ -266,7 +246,7 @@ def _check_refs(repo: Path, report: Report) -> None:
 
                 status = data.get("status", "open")
                 if status and status != "open":
-                    if not (repo / "log" / slug).is_dir():
+                    if not (client_dir / "log").is_dir():
                         missing_logs[slug].append(rel)
 
         # playbook refs
@@ -290,7 +270,6 @@ def _check_refs(repo: Path, report: Report) -> None:
         report.add("no files to check refs on", None, "skipped")
         return
 
-    # inbox refs results
     if missing_client_dirs:
         for slug, files in sorted(missing_client_dirs.items()):
             detail = f"clients/{slug}/ missing ← " + ", ".join(files)
@@ -317,13 +296,12 @@ def _check_refs(repo: Path, report: Report) -> None:
 
     if missing_logs:
         for slug, files in sorted(missing_logs.items()):
-            detail = f"log/{slug}/ missing ← " + ", ".join(files)
+            detail = f"clients/{slug}/log/ missing ← " + ", ".join(files)
             report.add(f"log dir not found for worked client: {slug}", None, detail, rule="aurora/refs.yml")
-            _gh_annotation("warning", f"giskard WARNING: log/{slug}/ missing", files[0])
+            _gh_annotation("warning", f"giskard WARNING: clients/{slug}/log/ missing", files[0])
     else:
         report.add(f"all log dirs present for worked clients ({inbox_total} inbox files)", True)
 
-    # playbook refs results
     if missing_extends:
         for parent, files in sorted(missing_extends.items()):
             detail = f"playbooks/{parent}.yml missing ← " + ", ".join(files)
