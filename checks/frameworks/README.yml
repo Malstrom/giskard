@@ -1,0 +1,200 @@
+# checks/frameworks/README.yml
+# How to add a new framework checker to giskard.
+# AI-only. Read this before writing any checker.
+# Source of truth: this file. Referenced by zeroth/.scenarios.yml add_checker.
+
+meta:
+  description: Contract and procedure for adding a framework checker to giskard.
+  every_checker_is: a single Python file in checks/frameworks/{name}.py
+  no_changes_needed_to: [giskard.py, core.py]
+
+# ---------------------------------------------------------------------------
+# STEP 1 — Read the framework spec in zeroth
+# ---------------------------------------------------------------------------
+spec_source:
+  location: zeroth/frameworks/{name}/
+  files_to_read:
+    - structure.yml      # → drives STRUCTURE_CHECKS
+    - .scenarios.yml     # → drives FILE_KEY_CHECKS (generated files + templates)
+    - templates/         # → confirms available templates
+  note: do not infer from the repo itself — always read zeroth spec first
+
+# ---------------------------------------------------------------------------
+# STEP 2 — Write the checker
+# ---------------------------------------------------------------------------
+required_interface:
+  file: checks/frameworks/{name}.py
+  must_export:
+    - name: run
+      signature: "run(repo: Path, report: Report) -> None"
+  imports:
+    - "from pathlib import Path"
+    - "from core import run_check, Report, ERROR, _gh_annotation"
+
+section_naming:
+  convention: "{framework}" for main section, "{framework} — {topic}" for sub-sections
+  example:
+    - "dojo"
+    - "dojo — files"
+    - "dojo — refs"
+
+result_levels:
+  true:  { meaning: check passed,            icon: "✅", exits_nonzero: false }
+  false: { meaning: check failed,             icon: "❌", exits_nonzero: true  }
+  null:  { meaning: skipped or warning,       icon: "⚠️", exits_nonzero: false }
+  ERROR: { meaning: proxy execution error,    icon: "💥", exits_nonzero: true  }
+
+label_convention:
+  rule: labels describe what is WRONG when the check fails
+  bad_example:  "handler reindex_check present"    # reads as passing even when failing
+  good_example: "handler reindex_check not found"  # clear regardless of icon
+
+aggregation_pattern:
+  rule: prefer O(anomalies) over O(files) — collect all, emit once per category
+  pattern: |
+    missing = defaultdict(list)
+    for f in files:
+        if problem:
+            missing[key].append(rel)
+    if missing:
+        for key, files in sorted(missing.items()):
+            detail = f"something missing ← " + ", ".join(files)
+            report.add(f"thing missing: {key}", False, detail, rule="framework/rule.yml")
+            _gh_annotation("error", f"giskard ERROR: ...", files[0])
+    else:
+        report.add(f"all things present ({total} files)", True)
+
+annotations:
+  false_results: emitted automatically by report.add()
+  none_results: must emit manually via _gh_annotation("warning", ..., file=...)
+
+skeleton: |
+  from pathlib import Path
+  from core import run_check, Report
+
+  CHECKS = [
+      {
+          "label": ".myframework.yml not found",
+          "proxy": "file_exists",
+          "target": ".myframework.yml",
+          "file": ".myframework.yml",
+          "rule": "myframework/structure.yml",
+      },
+  ]
+
+  def run(repo: Path, report: Report) -> None:
+      report.section("myframework")
+      for check in CHECKS:
+          run_check(repo, check, report)
+
+# ---------------------------------------------------------------------------
+# STEP 3 — Register in target repo
+# ---------------------------------------------------------------------------
+registration:
+  - set framework: {name} in the target repo .registry.yml
+  - set framework: {name} in the target repo validate.yml workflow
+
+# ---------------------------------------------------------------------------
+# PROXIES REFERENCE
+# ---------------------------------------------------------------------------
+proxies:
+
+  file_exists:
+    description: passes if path exists (file or directory)
+    params:
+      target: path relative to repo root
+      must_exist: bool, default true — set false to assert absence
+
+  dir_has_subfolders:
+    description: passes if directory contains at least one subdirectory
+    params:
+      target: directory path
+
+  dir_has_templates:
+    description: passes if directory contains all listed files
+    params:
+      target: directory path
+      required_files: list of filenames
+
+  template_matches_zeroth:
+    description: fetches template from zeroth and compares line-by-line
+    params:
+      framework: subdirectory in zeroth frameworks/
+      template: filename in templates/
+      zeroth_ref: git ref, default main
+
+  yaml_key_exists:
+    description: passes if top-level key is present in YAML file
+    params: { file: path, key: key name }
+
+  yaml_key_absent:
+    description: passes if key does NOT exist (use for forbidden fields)
+    params: { file: path, key: supports dot notation }
+
+  yaml_key_equals:
+    description: passes if key equals expected value
+    params: { file: path, key: supports dot notation, expected: value }
+
+  yaml_key_contains:
+    description: passes if key string value contains substring
+    params: { file: path, key: supports dot notation, contains: substring }
+
+  yaml_first_key:
+    description: passes if first non-comment key matches expected
+    params: { file: path, expected: key name }
+
+  yaml_levels_valid:
+    description: passes if all values under nested key are within allowed set
+    params: { file: path, key: nested key, allowed: list }
+
+  yaml_subkeys_exist:
+    description: passes if nested map contains all required subkeys
+    params: { file: path, key: nested key, required_subkeys: list }
+
+  scenario_present:
+    description: passes if scenario name exists under required_scenarios
+    params: { scenario: name }
+
+  scenario_last:
+    description: passes if scenario is the last key under required_scenarios
+    params: { scenario: name }
+
+  scenario_not_present:
+    description: passes if scenario does NOT exist
+    params: { scenario: name }
+
+  scenario_input_sources:
+    description: passes if scenario declares at least min_count input_sources
+    params: { scenario: name, min_count: int }
+
+  scenario_no_forbidden_modules:
+    description: passes if no handler uses say, ask, or propose
+    params: {}
+
+  handler_present:
+    description: passes if handler name exists under handlers in .agent.yml
+    params: { handler: name, file: .agent.yml }
+
+  handler_has_key:
+    description: passes if specific handler contains a key
+    params: { handler: name, key: key name }
+
+  text_search:
+    description: passes if all listed terms are found as substrings in file
+    params: { file: path, terms: list }
+
+  token_count:
+    description: passes if token appears exactly expected times in file
+    params: { file: path, token: string, expected: int }
+
+  file_access_mode:
+    description: passes if glob pattern appears under specific mode in file_access
+    params: { pattern: glob, mode: read or write }
+
+  write_ahead_rule:
+    description: passes if string is present in .agent.yml
+    params: { file: .agent.yml, contains: string }
+
+  generated_files_match_template:
+    description: passes if all files matched by glob contain all root keys of template
+    params: { glob: pattern, template: path to template yml }
