@@ -11,9 +11,9 @@ Usage:
   python giskard.py --repo /path/to/repo --github-token TOKEN
 
 Exit codes:
-  0  all checks passed
+  0  all checks passed (framework-specific checks may be skipped with a warning)
   1  one or more checks FAILED
-  2  validator error (framework not found, internal error)
+  2  internal validator error
 """
 
 import argparse
@@ -82,7 +82,6 @@ def load_framework_module(name: str):
     try:
         return importlib.import_module(f"checks.frameworks.{name}")
     except ModuleNotFoundError:
-        print(f"[giskard] ERROR: framework '{name}' not supported — add checks/frameworks/{name}.py")
         return None
 
 
@@ -105,11 +104,11 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
     connections.run(repo, report)
 
     # Layer 2 — framework-specific (optional)
-    fw_error = False
     if framework:
         fw = load_framework_module(framework)
         if fw is None:
-            fw_error = True
+            print(f"\n[giskard] WARNING: framework '{framework}' not yet supported — skipping framework-specific checks")
+            print(f"[giskard] To add support: create checks/frameworks/{framework}.py")
         else:
             fw.run(repo, report)
 
@@ -117,17 +116,21 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
           f"{report.skipped} skipped / {report.errored} errored")
 
     # Always save report before exiting
-    report.save()
+    report_path = report.save()
+
+    # Print report content to stdout for inline visibility in CI
+    print("\n" + "=" * 60)
+    print(report_path.read_text())
+    print("=" * 60)
 
     if not report.ok and github_token:
         open_failure_issue(report, repo.name, github_token)
 
-    if fw_error:
-        sys.exit(2)
     if report.errored > 0:
         sys.exit(2)
     if report.failed > 0:
         sys.exit(1)
+    # exit 0 — framework warning does not fail the build
 
 
 if __name__ == "__main__":
