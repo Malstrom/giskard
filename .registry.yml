@@ -12,6 +12,11 @@ connections:
     sync_trigger: []
     access: read
 
+  - repo: Malstrom/aurora
+    role: validation target
+    sync_trigger: []
+    access: read
+
   - repo: Malstrom/dojo
     role: primary validation target
     sync_trigger: []
