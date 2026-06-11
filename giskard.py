@@ -7,13 +7,17 @@ Optionally runs framework-specific checks if --framework is passed.
 
 Usage:
   python giskard.py --repo /path/to/repo
-  python giskard.py --repo /path/to/repo --framework dojo
+  python giskard.py --repo /path/to/repo --framework aurora
   python giskard.py --repo /path/to/repo --github-token TOKEN
 
 Exit codes:
   0  all checks passed (framework-specific checks may be skipped with a warning)
   1  one or more checks FAILED
   2  internal validator error
+
+Adding a framework:
+  Create checks/frameworks/{name}.py with run(repo: Path, report: Report) -> None.
+  See checks/frameworks/README.md for the full contract.
 """
 
 import argparse
@@ -22,7 +26,7 @@ import sys
 from pathlib import Path
 
 from core import Report, ERROR, _gh_annotation
-from checks import files, agent, scenarios, connections
+from checks import universal
 
 
 def open_failure_issue(report: Report, repo_name: str, token: str):
@@ -98,16 +102,17 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
     report = Report(repo)
 
     # Layer 1 — universal rules (always)
-    files.run(repo, report)
-    agent.run(repo, report)
-    scenarios.run(repo, report)
-    connections.run(repo, report)
+    universal.run(repo, report)
 
     # Layer 2 — framework-specific (optional)
     if framework:
         fw = load_framework_module(framework)
         if fw is None:
-            msg = f"framework '{framework}' not yet supported — skipping framework-specific checks. Add checks/frameworks/{framework}.py to enable."
+            msg = (
+                f"framework '{framework}' not yet supported — skipping framework-specific checks. "
+                f"Add checks/frameworks/{framework}.py to enable. "
+                f"See checks/frameworks/README.md for the contract."
+            )
             print(f"\n[giskard] WARNING: {msg}")
             _gh_annotation("warning", f"giskard: {msg}")
         else:
@@ -116,10 +121,8 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
     print(f"\n[giskard] result: {report.passed} passed / {report.failed} failed / "
           f"{report.skipped} skipped / {report.errored} errored")
 
-    # Always save report before exiting
     report_path = report.save()
 
-    # Print report inline for CI log visibility
     print("\n" + "=" * 60)
     print(report_path.read_text())
     print("=" * 60)
@@ -131,7 +134,6 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
         sys.exit(2)
     if report.failed > 0:
         sys.exit(1)
-    # exit 0 — framework warning does not fail the build
 
 
 if __name__ == "__main__":
