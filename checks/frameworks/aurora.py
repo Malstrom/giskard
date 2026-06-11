@@ -24,7 +24,6 @@ REQUIRED_TEMPLATES = [
 ]
 
 STRUCTURE_CHECKS = [
-    # --- required aurora files and directories ---
     {
         "label": ".aurora.yml exists",
         "proxy": "file_exists",
@@ -60,8 +59,6 @@ STRUCTURE_CHECKS = [
         "file": "playbooks/",
         "rule": "aurora/structure.yml",
     },
-
-    # --- templates/ completeness ---
     {
         "label": "templates/ has all required aurora templates",
         "proxy": "dir_has_templates",
@@ -69,8 +66,6 @@ STRUCTURE_CHECKS = [
         "required_files": REQUIRED_TEMPLATES,
         "rule": "aurora/structure.yml",
     },
-
-    # --- .aurora.yml structure ---
     {
         "label": ".aurora.yml has 'version' field",
         "proxy": "yaml_key_exists",
@@ -106,8 +101,6 @@ STRUCTURE_CHECKS = [
         "key": "work_types",
         "rule": "aurora/structure.yml",
     },
-
-    # --- handlers ---
     {
         "label": "handler reindex_check present",
         "proxy": "handler_present",
@@ -130,12 +123,12 @@ def _read_inbox_file(path: Path) -> dict:
 def _check_referential_integrity(repo: Path, report: Report) -> None:
     """
     For every inbox file in clients/*/inbox/:
-    - client dir exists                          → ERROR if missing
+    - data['client'] dir exists in clients/     → ERROR if missing
     - contact file exists in contacts/           → WARNING if missing
     - assigned_to contact exists in contacts/    → WARNING if missing
     - if status != open → log/{client}/ exists  → WARNING if missing
 
-    Skipped entirely if inbox is empty or missing for a client.
+    Skipped entirely if no inbox files exist anywhere.
     """
     clients_dir = repo / "clients"
     if not clients_dir.is_dir():
@@ -154,16 +147,18 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
             continue
 
         found_any_inbox = True
-        slug = client_dir.name
 
         for inbox_file in sorted(inbox_files):
             data = _read_inbox_file(inbox_file)
             rel = str(inbox_file.relative_to(repo))
 
-            # 1 — client directory exists
+            # slug from yaml field, not from dir name
+            slug = data.get("client") or client_dir.name
+
+            # 1 — client dir declared in yaml exists
             client_path = repo / "clients" / slug
             if not client_path.is_dir():
-                msg = f"client dir 'clients/{slug}/' missing (referenced in {rel})"
+                msg = f"client dir 'clients/{slug}/' missing (declared in {rel})"
                 report.add(f"client dir exists: {slug}", False, msg, file=rel, rule="aurora/structure.yml")
             else:
                 report.add(f"client dir exists: {slug}", True, file=rel)
