@@ -10,8 +10,7 @@ Last updated: 2026-06-11
 Section order (top-down, most general to most specific):
 
   dojo — structure
-    Required root files: .agent.yml, .scenarios.yml, .registry.yml,
-    .gakusei.yml, onboarding.yml
+    Required root files: .agent.yml, .scenarios.yml, .registry.yml, .gakusei.yml
     Required dirs: kata/, kiroku/makimono/, kiroku/nikki/, templates/
     Required templates: kata.yml, kiroku_nikki.yml, kiroku_makimono.yml, shinsa.yml
     .gakusei.yml required keys: name, language, subjects, last_session
@@ -72,13 +71,6 @@ STRUCTURE_CHECKS = [
         "proxy": "file_exists",
         "target": ".gakusei.yml",
         "file": ".gakusei.yml",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": "onboarding.yml not found",
-        "proxy": "file_exists",
-        "target": "onboarding.yml",
-        "file": "onboarding.yml",
         "rule": "dojo/structure.yml",
     },
     {
@@ -234,11 +226,6 @@ def _read_yaml_file(path: Path) -> dict:
 
 
 def _check_refs(repo: Path, report: Report) -> None:
-    """
-    Referential integrity checks:
-    1. kiroku/nikki/ filenames match YYYY-MM-DD_{subject}_{type}.yml
-    2. .gakusei.yml last_session.subject -> kata/{subject}/ must exist
-    """
     # 1 — nikki filename pattern
     nikki_dir = repo / "kiroku" / "nikki"
     if nikki_dir.is_dir():
