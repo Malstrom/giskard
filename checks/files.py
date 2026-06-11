@@ -1,7 +1,8 @@
 """
-checks/files.py — rules/files.yml
+checks/files.py — zeroth laws: required files
 
-Validates required files are present in the repo.
+Validates that all mandatory structural files are present.
+These checks run first — they are framework-agnostic.
 """
 
 from pathlib import Path
@@ -47,6 +48,6 @@ CHECKS = [
 
 
 def run(repo: Path, report: Report) -> None:
-    report.section("files")
+    report.section("zeroth — files")
     for check in CHECKS:
         run_check(repo, check, report)
