@@ -1,14 +1,14 @@
 """
-checks/agent.py — rules/agent.yml
+checks/agent.py — zeroth laws: agent manifest
 
 Validates .agent.yml structure and required blocks.
+These checks are framework-agnostic.
 """
 
 from pathlib import Path
 from core import run_check, Report
 
 CHECKS = [
-    # YAML parseable — if key exists, yaml.safe_load worked
     {
         "label": ".agent.yml is valid YAML",
         "proxy": "yaml_key_exists",
@@ -16,7 +16,6 @@ CHECKS = [
         "key": "connector_check",
         "rule": "agent.yml",
     },
-    # connector_check must be the first block
     {
         "label": "connector_check is the first block",
         "proxy": "yaml_first_key",
@@ -24,7 +23,6 @@ CHECKS = [
         "expected": "connector_check",
         "rule": "agent.yml",
     },
-    # Required blocks present
     {
         "label": "global block present",
         "proxy": "yaml_key_exists",
@@ -67,7 +65,6 @@ CHECKS = [
         "key": "post_action_hook",
         "rule": "agent.yml",
     },
-    # global.language declared, global.replies_in forbidden
     {
         "label": "global.language declared",
         "proxy": "yaml_key_exists",
@@ -82,7 +79,6 @@ CHECKS = [
         "key": "global.replies_in",
         "rule": "agent.yml",
     },
-    # post_action_hook has after_every_state_change
     {
         "label": "post_action_hook.after_every_state_change present",
         "proxy": "yaml_subkeys_exist",
@@ -95,6 +91,6 @@ CHECKS = [
 
 
 def run(repo: Path, report: Report) -> None:
-    report.section("agent")
+    report.section("zeroth — agent")
     for check in CHECKS:
         run_check(repo, check, report)
