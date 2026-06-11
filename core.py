@@ -13,13 +13,8 @@ import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Sentinel for proxy execution errors (distinct from False = check failed)
 ERROR = "error"
 
-
-# ---------------------------------------------------------------------------
-# File helpers
-# ---------------------------------------------------------------------------
 
 def _read_file(repo: Path, filename: str) -> str:
     p = repo / filename
@@ -51,16 +46,11 @@ def _fetch_url(url: str) -> str:
 
 
 def _gh_annotation(level: str, message: str, file: str = ""):
-    """Print a GitHub Actions workflow command for annotations."""
     if file:
         print(f"::{level} file={file}::{message}")
     else:
         print(f"::{level}::{message}")
 
-
-# ---------------------------------------------------------------------------
-# Proxy implementations
-# ---------------------------------------------------------------------------
 
 def proxy_file_exists(repo: Path, check: dict) -> tuple:
     target = check["target"]
@@ -121,7 +111,6 @@ def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_key_absent(repo: Path, check: dict) -> tuple:
-    """Passes if the key does NOT exist. Used for forbidden fields."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -131,9 +120,7 @@ def proxy_yaml_key_absent(repo: Path, check: dict) -> tuple:
         if k not in val:
             return True, ""
         val = val[k]
-    present = True
-    if present:
-        print(f"    forbidden key '{check['key']}' is present")
+    print(f"    forbidden key '{check['key']}' is present")
     return False, f"forbidden key '{check['key']}' found"
 
 
@@ -201,6 +188,15 @@ def proxy_yaml_subkeys_exist(repo: Path, check: dict) -> tuple:
     return len(missing) == 0, ""
 
 
+def proxy_yaml_has_required_keys(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    required = check.get("required_keys", [])
+    missing = [k for k in required if k not in parsed]
+    if missing:
+        print(f"    missing keys in {check['file']}: {missing}")
+    return len(missing) == 0, ""
+
+
 def proxy_scenario_present(repo: Path, check: dict) -> tuple:
     sc = _parse_yaml(repo, ".scenarios.yml")
     rs = sc.get("required_scenarios", {})
@@ -237,7 +233,6 @@ def proxy_scenario_input_sources(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_no_forbidden_modules(repo: Path, check: dict) -> tuple:
-    """Verifies that handler actions do not contain say, ask, or propose."""
     FORBIDDEN = {"say", "ask", "propose"}
     parsed = _parse_yaml(repo, ".agent.yml")
     handlers = parsed.get("handlers", {}) or {}
@@ -313,10 +308,6 @@ def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
     return check["contains"] in content, ""
 
 
-# ---------------------------------------------------------------------------
-# Proxy registry
-# ---------------------------------------------------------------------------
-
 PROXY_REGISTRY = {
     "file_exists": proxy_file_exists,
     "dir_has_subfolders": proxy_dir_has_subfolders,
@@ -329,6 +320,7 @@ PROXY_REGISTRY = {
     "yaml_first_key": proxy_yaml_first_key,
     "yaml_levels_valid": proxy_yaml_levels_valid,
     "yaml_subkeys_exist": proxy_yaml_subkeys_exist,
+    "yaml_has_required_keys": proxy_yaml_has_required_keys,
     "scenario_present": proxy_scenario_present,
     "scenario_last": proxy_scenario_last,
     "scenario_not_present": proxy_scenario_not_present,
@@ -343,35 +335,35 @@ PROXY_REGISTRY = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Report
-# ---------------------------------------------------------------------------
-
 class Report:
     def __init__(self, repo: Path):
         self.repo = repo
-        self.lines = []
+        self.entries = []
+        self.current_section = None
         self.passed = 0
         self.failed = 0
         self.skipped = 0
         self.errored = 0
-        self.failures = []  # list of {label, file, rule} for issue creation
+        self.failures = []
         self.ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     def add(self, label: str, result, note: str = "", file: str = "", rule: str = ""):
         if result is True:
             self.passed += 1
-            icon = "\u2705"
+            icon = "✅"
+            kind = "passed"
         elif result is ERROR:
             self.errored += 1
-            icon = "\U0001f4a5"
+            icon = "💥"
+            kind = "errored"
             msg = f"giskard error: {label}"
             if note:
                 msg += f" — {note}"
             _gh_annotation("error", msg, file)
         elif result is False:
             self.failed += 1
-            icon = "\u274c"
+            icon = "❌"
+            kind = "failed"
             self.failures.append({"label": label, "file": file, "rule": rule})
             msg = f"giskard FAILED: {label}"
             if note:
@@ -381,25 +373,30 @@ class Report:
             _gh_annotation("error", msg, file)
         else:
             self.skipped += 1
-            icon = "\u26a0\ufe0f"
+            icon = "⚠️"
+            kind = "skipped"
         suffix = f" — {note}" if note else ""
         line = f"  {icon} {label}{suffix}"
         print(line)
-        self.lines.append(line)
+        self.entries.append({
+            "section": self.current_section or "checks",
+            "kind": kind,
+            "line": line,
+        })
 
     def section(self, name: str):
-        line = f"\n\u2502 {name}"
-        print(line)
-        self.lines.append(line)
+        self.current_section = name
+        print(f"\n│ {name}")
 
     def save(self) -> Path:
         out = self.repo / "giskard-report.md"
         if self.errored > 0:
-            status = "\U0001f4a5 error"
+            status = "💥 error"
         elif self.failed > 0:
-            status = "\u274c failed"
+            status = "❌ failed"
         else:
-            status = "\u2705 passed"
+            status = "✅ passed"
+
         header = [
             "# giskard report",
             "",
@@ -410,9 +407,35 @@ class Report:
             "## checks",
             "",
         ]
+
+        by_section = {}
+        for e in self.entries:
+            by_section.setdefault(e["section"], []).append(e)
+
+        body = []
+        for section, items in by_section.items():
+            passed = sum(1 for i in items if i["kind"] == "passed")
+            failed = sum(1 for i in items if i["kind"] == "failed")
+            skipped = sum(1 for i in items if i["kind"] == "skipped")
+            errored = sum(1 for i in items if i["kind"] == "errored")
+
+            if failed == 0 and errored == 0 and skipped == 0:
+                body.append(f"│ {section} ✅ {passed}/{len(items)}")
+                continue
+
+            section_status = "❌" if (failed or errored) else "⚠️"
+            body.append(f"│ {section} {section_status} {passed} passed / {failed} failed / {skipped} skipped / {errored} errored")
+            for item in items:
+                if item["kind"] != "passed":
+                    body.append(item["line"])
+            if failed == 0 and errored == 0 and skipped > 0:
+                body.append("  ℹ️ passed checks hidden")
+            elif passed > 0:
+                body.append(f"  ℹ️ {passed} passed checks hidden")
+            body.append("")
+
         with open(out, "w") as f:
-            f.write("\n".join(header) + "\n")
-            f.write("\n".join(self.lines) + "\n")
+            f.write("\n".join(header + body).rstrip() + "\n")
         print(f"\n[giskard] report written to {out}")
         return out
 
@@ -420,10 +443,6 @@ class Report:
     def ok(self) -> bool:
         return self.failed == 0 and self.errored == 0
 
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
 
 def run_check(repo: Path, check: dict, report: Report):
     label = check.get("label", str(check))
@@ -442,6 +461,6 @@ def run_check(repo: Path, check: dict, report: Report):
             file=check.get("file", check.get("target", "")),
             rule=check.get("rule", ""),
         )
-    except Exception as e:
+    except Exception:
         tb = traceback.format_exc().strip().splitlines()[-1]
         report.add(label, ERROR, f"{tb}")

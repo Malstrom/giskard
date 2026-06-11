@@ -6,138 +6,12 @@ AURORA FRAMEWORK SPEC
 Inferred from: aurora/.scenarios.yml + repo structure
 Last updated: 2026-06-11
 ================================================================================
-
-## What is aurora
-
-aurora is a client-work operating system. An agent uses it to manage ongoing
-work relationships with external clients: ingesting tasks, delegating work,
-executing playbooks, logging sessions, and drafting communications.
-
-Directory structure:
-
-  .aurora.yml                         — framework config (clients list, work_types, owner)
-  clients/{slug}/
-    inbox/        — work assignments as yml files (one per task)
-    context.yml   — client background, preferences, history summary
-    summary.md    — auto-updated client overview
-    playbooks/    — client-specific playbook overrides (extends general)
-    output/       — produced files: report, email, csv (typed, named by date+playbook+type)
-  contacts/{slug}.yml                 — contact definitions (people, not clients)
-  log/{client}/                       — session logs (IMMUTABLE after creation)
-    {date}.yml    — work session log
-    {date}_{playbook}.yml — playbook execution log
-  log/_index/{year}.yml               — aggregated annual log index
-  playbooks/{name}.yml                — general playbooks (reusable, no client refs)
-  templates/                          — canonical templates for all writable file types
-
-================================================================================
-CHECK GROUPS AND REASONING
-================================================================================
-
-## 1 — Structure checks (ERROR on failure)
-
-Source scenarios: session_start (reads .aurora.yml, clients/),
-                  ingest_task (reads templates/inbox.yml, writes clients/{slug}/inbox/),
-                  work_session (reads playbooks/{work_type}.yml)
-
-.aurora.yml must exist and have: version, owner, language, clients, work_types
-  → session_start reads .aurora.yml on every open. Missing = agent cannot start.
-  → clients list is used to enumerate open tasks and route work.
-
-clients/ must exist
-  → session_start enumerates clients/. Missing = no work can be routed.
-
-contacts/ must exist
-  → delegate_task reads contacts/. Missing = delegation is blind.
-
-log/ must exist
-  → log_work, delegate_task, rate_work all write to log/{slug}/.
-  → Missing = no traceability.
-
-playbooks/ must exist
-  → work_session reads playbooks/{work_type}.yml.
-  → Missing = no playbook can be executed.
-
-templates/ must have: inbox.yml, log.yml, log_index.yml, contact.yml,
-                      client_context.yml, playbook.yml
-  → ingest_task creates inbox files from templates/inbox.yml.
-  → log_work and reindex use templates/log.yml and log_index.yml.
-  → Missing template = agent cannot create the file type safely.
-
-handler reindex_check must be present in .agent.yml
-  → log_work calls reindex when unindexed_log_count > 30.
-  → reindex_check handler drives this automation.
-  → Missing = log index silently grows unbounded.
-
-## 2 — Referential integrity (aggregated, mixed ERROR/WARNING)
-
-Source scenarios: ingest_task (creates inbox with client+contact fields),
-                  delegate_task (reads contacts/, updates inbox assigned_to),
-                  rate_work (reads contacts/{contact_file}),
-                  log_work (writes log/{slug}/)
-
-For every clients/*/inbox/*.yml:
-
-  client dir missing — ERROR
-    inbox file declares client: {slug} but clients/{slug}/ does not exist.
-    → work_session, delegate_task, all scenarios using {slug} would fail.
-    → Blocking: no work can be executed for this client.
-
-  contact missing — WARNING
-    inbox file declares contact: {slug} but contacts/{slug}.yml missing.
-    → draft_reply, rate_work, delegate_task cannot load contact preferences.
-    → Non-blocking: task can still be executed, communication is degraded.
-
-  assigned_to missing — WARNING
-    inbox file declares assigned_to: {slug} but contacts/{slug}.yml missing.
-    → delegate_task and rate_work cannot resolve the assignee.
-    → Non-blocking: task is recorded, traceability is degraded.
-
-  log dir missing for worked client — WARNING
-    inbox status != open but log/{slug}/ does not exist.
-    → log_work, delegate_task, rate_work all write to log/{slug}/.
-    → Non-blocking at check time (dir may be created on first write),
-      but indicates a traceability gap in an already-worked client.
-
-## 3 — Playbook structure (ERROR/WARNING)
-
-Source scenarios: work_session (reads playbooks/{work_type}.yml and
-                  implicitly clients/{slug}/playbooks/{work_type}.yml for overrides)
-
-For every clients/*/playbooks/*.yml:
-
-  extends missing — ERROR
-    Client playbook has no extends field.
-    → work_session cannot merge general + client steps safely.
-    → Unanchored playbook: unknown which general playbook it overrides.
-
-  extends target missing — ERROR
-    Client playbook extends: {name} but playbooks/{name}.yml does not exist.
-    → work_session would load client override but find no general steps to merge.
-    → Playbook execution would be partial or undefined.
-
-  client field mismatch — WARNING
-    client: {declared} does not match the containing clients/{dir}/ directory.
-    → Non-blocking but indicates a copy-paste error or misplaced file.
-
-================================================================================
-KNOWN GAPS / FUTURE CHECKS
-================================================================================
-
-- output/ file naming: {date}_{playbook}_{type}.{ext} convention not yet validated
-- playbook execution log: log/{client}/{date}_{playbook}.yml not yet validated
-- templates/output_*.md completeness not yet validated
-- contacts/{slug}.yml internal structure (required fields) not yet validated
-- clients/{slug}/context.yml existence not yet validated
-  (read by work_session and summarize_client)
-
-================================================================================
 """
 
 import yaml
 from pathlib import Path
 from collections import defaultdict
-from core import run_check, Report, ERROR, _gh_annotation
+from core import run_check, Report, _gh_annotation
 
 REQUIRED_TEMPLATES = [
     "inbox.yml",
@@ -146,92 +20,76 @@ REQUIRED_TEMPLATES = [
     "contact.yml",
     "client_context.yml",
     "playbook.yml",
+    "output_csv.md",
+    "output_email.md",
+    "output_report.md",
+    "playbook_log.yml",
 ]
 
 STRUCTURE_CHECKS = [
+    {"label": ".aurora.yml exists", "proxy": "file_exists", "target": ".aurora.yml", "file": ".aurora.yml", "rule": "aurora/structure.yml"},
+    {"label": "clients/ directory exists", "proxy": "file_exists", "target": "clients", "file": "clients/", "rule": "aurora/structure.yml"},
+    {"label": "contacts/ directory exists", "proxy": "file_exists", "target": "contacts", "file": "contacts/", "rule": "aurora/structure.yml"},
+    {"label": "log/ directory exists", "proxy": "file_exists", "target": "log", "file": "log/", "rule": "aurora/structure.yml"},
+    {"label": "playbooks/ directory exists", "proxy": "file_exists", "target": "playbooks", "file": "playbooks/", "rule": "aurora/structure.yml"},
+    {"label": "templates/ has all required aurora templates", "proxy": "dir_has_templates", "target": "templates", "required_files": REQUIRED_TEMPLATES, "rule": "aurora/structure.yml"},
+    {"label": ".aurora.yml has 'version' field", "proxy": "yaml_key_exists", "file": ".aurora.yml", "key": "version", "rule": "aurora/structure.yml"},
+    {"label": ".aurora.yml has 'owner' field", "proxy": "yaml_key_exists", "file": ".aurora.yml", "key": "owner", "rule": "aurora/structure.yml"},
+    {"label": ".aurora.yml has 'language' field", "proxy": "yaml_key_exists", "file": ".aurora.yml", "key": "language", "rule": "aurora/structure.yml"},
+    {"label": ".aurora.yml has 'clients' field", "proxy": "yaml_key_exists", "file": ".aurora.yml", "key": "clients", "rule": "aurora/structure.yml"},
+    {"label": ".aurora.yml has 'work_types' field", "proxy": "yaml_key_exists", "file": ".aurora.yml", "key": "work_types", "rule": "aurora/structure.yml"},
+    {"label": "handler reindex_check present", "proxy": "handler_present", "handler": "reindex_check", "file": ".agent.yml", "rule": "aurora/structure.yml"},
+]
+
+TEMPLATE_CHECKS = [
     {
-        "label": ".aurora.yml exists",
-        "proxy": "file_exists",
-        "target": ".aurora.yml",
-        "file": ".aurora.yml",
-        "rule": "aurora/structure.yml",
+        "label": "templates/inbox.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/inbox.yml",
+        "required_keys": ["date", "client", "contact", "source", "subject", "task", "assigned_to", "status", "status_log", "issue_ref", "playbook"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": "clients/ directory exists",
-        "proxy": "file_exists",
-        "target": "clients",
-        "file": "clients/",
-        "rule": "aurora/structure.yml",
+        "label": "templates/log.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/log.yml",
+        "required_keys": ["date", "client", "session_type", "summary", "entries"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": "contacts/ directory exists",
-        "proxy": "file_exists",
-        "target": "contacts",
-        "file": "contacts/",
-        "rule": "aurora/structure.yml",
+        "label": "templates/log_index.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/log_index.yml",
+        "required_keys": ["year", "client", "monthly_refs"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": "log/ directory exists",
-        "proxy": "file_exists",
-        "target": "log",
-        "file": "log/",
-        "rule": "aurora/structure.yml",
+        "label": "templates/contact.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/contact.yml",
+        "required_keys": ["name", "slug", "role", "email", "performance_log"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": "playbooks/ directory exists",
-        "proxy": "file_exists",
-        "target": "playbooks",
-        "file": "playbooks/",
-        "rule": "aurora/structure.yml",
+        "label": "templates/client_context.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/client_context.yml",
+        "required_keys": ["client", "summary", "preferences", "active_workstreams"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": "templates/ has all required aurora templates",
-        "proxy": "dir_has_templates",
-        "target": "templates",
-        "required_files": REQUIRED_TEMPLATES,
-        "rule": "aurora/structure.yml",
+        "label": "templates/playbook.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/playbook.yml",
+        "required_keys": ["name", "description", "work_type", "steps"],
+        "rule": "aurora/templates.yml",
     },
     {
-        "label": ".aurora.yml has 'version' field",
-        "proxy": "yaml_key_exists",
-        "file": ".aurora.yml",
-        "key": "version",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": ".aurora.yml has 'owner' field",
-        "proxy": "yaml_key_exists",
-        "file": ".aurora.yml",
-        "key": "owner",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": ".aurora.yml has 'language' field",
-        "proxy": "yaml_key_exists",
-        "file": ".aurora.yml",
-        "key": "language",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": ".aurora.yml has 'clients' field",
-        "proxy": "yaml_key_exists",
-        "file": ".aurora.yml",
-        "key": "clients",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": ".aurora.yml has 'work_types' field",
-        "proxy": "yaml_key_exists",
-        "file": ".aurora.yml",
-        "key": "work_types",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": "handler reindex_check present",
-        "proxy": "handler_present",
-        "handler": "reindex_check",
-        "file": ".agent.yml",
-        "rule": "aurora/structure.yml",
+        "label": "templates/playbook_log.yml has required root keys",
+        "proxy": "yaml_has_required_keys",
+        "file": "templates/playbook_log.yml",
+        "required_keys": ["date", "client", "playbook", "steps_completed", "outputs"],
+        "rule": "aurora/templates.yml",
     },
 ]
 
@@ -246,11 +104,6 @@ def _read_yaml_file(path: Path) -> dict:
 
 
 def _check_referential_integrity(repo: Path, report: Report) -> None:
-    """
-    Aggregated referential integrity check.
-    Iterates all clients/*/inbox/*.yml, collects anomalies,
-    then emits one result per category.
-    """
     clients_dir = repo / "clients"
     if not clients_dir.is_dir():
         return
@@ -277,7 +130,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
             total_files += 1
 
             slug = data.get("client") or client_dir.name
-
             if not (repo / "clients" / slug).is_dir():
                 missing_client_dirs[slug].append(rel)
 
@@ -333,16 +185,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
 
 def _check_playbook_structure(repo: Path, report: Report) -> None:
-    """
-    Validates two-level playbook structure.
-
-    For every file in clients/*/playbooks/*.yml:
-    - A: 'extends' field present           → ERROR if missing
-    - B: playbooks/{extends}.yml exists    → ERROR if missing
-    - C: 'client' field matches dir name   → WARNING if mismatch
-
-    Skipped if no client playbooks exist.
-    """
     clients_dir = repo / "clients"
     if not clients_dir.is_dir():
         return
@@ -410,6 +252,10 @@ def _check_playbook_structure(repo: Path, report: Report) -> None:
 def run(repo: Path, report: Report) -> None:
     report.section("aurora")
     for check in STRUCTURE_CHECKS:
+        run_check(repo, check, report)
+
+    report.section("aurora — templates")
+    for check in TEMPLATE_CHECKS:
         run_check(repo, check, report)
 
     report.section("aurora — referential integrity")
