@@ -50,6 +50,14 @@ def _fetch_url(url: str) -> str:
         return ""
 
 
+def _gh_annotation(level: str, message: str, file: str = ""):
+    """Print a GitHub Actions workflow command for annotations."""
+    if file:
+        print(f"::{level} file={file}::{message}")
+    else:
+        print(f"::{level}::{message}")
+
+
 # ---------------------------------------------------------------------------
 # Proxy implementations
 # ---------------------------------------------------------------------------
@@ -357,10 +365,20 @@ class Report:
         elif result is ERROR:
             self.errored += 1
             icon = "\U0001f4a5"
+            msg = f"giskard error: {label}"
+            if note:
+                msg += f" — {note}"
+            _gh_annotation("error", msg, file)
         elif result is False:
             self.failed += 1
             icon = "\u274c"
             self.failures.append({"label": label, "file": file, "rule": rule})
+            msg = f"giskard FAILED: {label}"
+            if note:
+                msg += f" — {note}"
+            if rule:
+                msg += f" (rule: {rule})"
+            _gh_annotation("error", msg, file)
         else:
             self.skipped += 1
             icon = "\u26a0\ufe0f"
