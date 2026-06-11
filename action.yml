@@ -1,49 +1,55 @@
-# GitHub Action definition for giskard
-# Use this in your framework repo to validate on every push/PR
-#
-# Example usage in .github/workflows/validate.yml:
-#   - uses: Malstrom/giskard@main
-#     with:
-#       framework: dojo
-#       zeroth-ref: v1.0.0   # optional — pin to a tag or SHA
-
 name: giskard
-description: Validate a Malstrom framework repo against zeroth rules
+description: Validate a repo against zeroth universal rules
 author: Malstrom
 
 inputs:
-  framework:
-    description: Framework name (e.g. dojo, tensho, sudo-hire-me)
-    required: true
-  zeroth-ref:
-    description: Git ref (tag, SHA, branch) for zeroth checklist. Default: main.
+  repo:
+    description: Path to the repo to validate (default: current directory)
     required: false
-    default: main
-
-outputs:
-  report-file:
-    description: Path to the generated giskard-report.md
-    value: ${{ github.workspace }}/giskard-report.md
+    default: "."
+  framework:
+    description: Optional framework-specific checks (e.g. dojo, aurora, tensho)
+    required: false
+    default: ""
+  github-token:
+    description: GitHub token to open issues on failure
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
     - name: Install dependencies
       shell: bash
       run: pip install pyyaml
 
-    - name: Run giskard validator
+    - name: Checkout giskard
+      uses: actions/checkout@v4
+      with:
+        repository: Malstrom/giskard
+        path: _giskard
+
+    - name: Run giskard
       shell: bash
       run: |
-        python ${{ github.action_path }}/giskard.py \
-          --framework ${{ inputs.framework }} \
-          --repo ${{ github.workspace }} \
-          --zeroth-ref ${{ inputs.zeroth-ref }}
+        ARGS="--repo ${{ inputs.repo }}"
+        if [ -n "${{ inputs.framework }}" ]; then
+          ARGS="$ARGS --framework ${{ inputs.framework }}"
+        fi
+        if [ -n "${{ inputs.github-token }}" ]; then
+          ARGS="$ARGS --github-token ${{ inputs.github-token }}"
+        fi
+        python _giskard/giskard.py $ARGS
 
-    - name: Upload giskard report
+    - name: Upload report
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: giskard-report
-        path: ${{ github.workspace }}/giskard-report.md
-        if-no-files-found: warn
+        path: giskard-report.md
+        if-no-files-found: ignore
