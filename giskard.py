@@ -13,7 +13,7 @@ Usage:
 Exit codes:
   0  all checks passed
   1  one or more checks FAILED
-  2  one or more checks ERRORED (validator itself broke)
+  2  validator error (framework not found, internal error)
 """
 
 import argparse
@@ -83,14 +83,14 @@ def load_framework_module(name: str):
         return importlib.import_module(f"checks.frameworks.{name}")
     except ModuleNotFoundError:
         print(f"[giskard] ERROR: framework '{name}' not supported — add checks/frameworks/{name}.py")
-        sys.exit(1)
+        return None
 
 
 def run(repo_path: str, framework: str = None, github_token: str = None):
     repo = Path(repo_path).resolve()
     if not repo.is_dir():
         print(f"[giskard] ERROR: repo path not found: {repo}")
-        sys.exit(1)
+        sys.exit(2)
 
     print(f"[giskard] validating '{repo.name}'")
     if framework:
@@ -98,25 +98,32 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
 
     report = Report(repo)
 
-    # Layer 1 — universal rules
+    # Layer 1 — universal rules (always)
     files.run(repo, report)
     agent.run(repo, report)
     scenarios.run(repo, report)
     connections.run(repo, report)
 
     # Layer 2 — framework-specific (optional)
+    fw_error = False
     if framework:
         fw = load_framework_module(framework)
-        fw.run(repo, report)
+        if fw is None:
+            fw_error = True
+        else:
+            fw.run(repo, report)
 
     print(f"\n[giskard] result: {report.passed} passed / {report.failed} failed / "
           f"{report.skipped} skipped / {report.errored} errored")
 
-    report_path = report.save()
+    # Always save report before exiting
+    report.save()
 
     if not report.ok and github_token:
         open_failure_issue(report, repo.name, github_token)
 
+    if fw_error:
+        sys.exit(2)
     if report.errored > 0:
         sys.exit(2)
     if report.failed > 0:
