@@ -19,7 +19,7 @@ Section order (top-down, most general to most specific):
     Mapping (glob → template):
       clients/*/inbox/*.yml          → templates/inbox.yml
       contacts/*.yml                 → templates/contact.yml
-      clients/*/log/[0-9]*.yml       → templates/log.yml       (session logs only)
+      clients/*/log/????-??-??.yml   → templates/log.yml       (session logs: YYYY-MM-DD.yml only)
       clients/*/log/*.index.yml      → templates/log_index.yml  (monthly index)
     Skipped if no generated files exist. No network calls.
     Note: clients/*/playbooks/*.yml not validated here — client playbooks
@@ -167,7 +167,7 @@ FILE_KEY_CHECKS = [
     {
         "label": "log session files: keys missing vs templates/log.yml",
         "proxy": "generated_files_match_template",
-        "glob": "clients/*/log/[0-9]*.yml",
+        "glob": "clients/*/log/????-??-??.yml",
         "template": "templates/log.yml",
         "rule": "aurora/files.yml",
     },
