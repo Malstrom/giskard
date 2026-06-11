@@ -115,9 +115,8 @@ def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
 
 
 def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
-    """Fetches canonical yml template from the framework repo at runtime,
-    extracts its root keys, and verifies the local template has them all.
-    No hardcoded key lists required in the check definition.
+    """Kept for backward compatibility. Fetches canonical template from remote.
+    Prefer proxy_generated_files_match_template for local validation.
     """
     framework = check["framework"]
     template = check["template"]
@@ -145,6 +144,55 @@ def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
     if missing:
         print(f"    missing keys in templates/{template}: {sorted(missing)}")
     return len(missing) == 0, ""
+
+
+def proxy_generated_files_match_template(repo: Path, check: dict) -> tuple:
+    """Checks that every generated file matching a glob pattern contains
+    all root keys defined in the corresponding local template.
+
+    The template lives in templates/ inside the repo — no network calls.
+
+    check keys:
+      glob     — glob pattern relative to repo root (e.g. 'clients/*/inbox/*.yml')
+      template — path to local template relative to repo root (e.g. 'templates/inbox.yml')
+    """
+    template_path = repo / check["template"]
+    glob_pattern = check["glob"]
+
+    if not template_path.exists():
+        return None, f"{check['template']} not found — skipped"
+
+    try:
+        raw = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+        template_keys = set(raw.keys()) if isinstance(raw, dict) else set()
+    except yaml.YAMLError:
+        return None, f"{check['template']} is not valid YAML — skipped"
+
+    if not template_keys:
+        return None, f"{check['template']} has no root keys — skipped"
+
+    files = sorted(repo.glob(glob_pattern))
+    if not files:
+        return None, f"no files found matching {glob_pattern} — skipped"
+
+    violations = []
+    for f in files:
+        try:
+            parsed = yaml.safe_load(f.read_text(encoding="utf-8"))
+            file_keys = set(parsed.keys()) if isinstance(parsed, dict) else set()
+        except yaml.YAMLError:
+            violations.append((str(f.relative_to(repo)), {"<invalid YAML>"}))
+            continue
+        missing = template_keys - file_keys
+        if missing:
+            violations.append((str(f.relative_to(repo)), missing))
+
+    if violations:
+        for path, missing in violations:
+            print(f"    {path}: missing keys {sorted(missing)}")
+        return False, f"{len(violations)}/{len(files)} files missing keys"
+
+    return True, f"{len(files)} file(s) checked"
 
 
 def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
@@ -356,6 +404,7 @@ PROXY_REGISTRY = {
     "dir_has_templates": proxy_dir_has_templates,
     "template_matches_zeroth": proxy_template_matches_zeroth,
     "template_keys_match_framework": proxy_template_keys_match_framework,
+    "generated_files_match_template": proxy_generated_files_match_template,
     "yaml_key_exists": proxy_yaml_key_exists,
     "yaml_key_absent": proxy_yaml_key_absent,
     "yaml_key_equals": proxy_yaml_key_equals,
@@ -390,7 +439,7 @@ class Report:
         self.failed = 0
         self.skipped = 0
         self.errored = 0
-        self.failures = []  # list of {label, file, rule} for issue creation
+        self.failures = []
         self.ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     def add(self, label: str, result, note: str = "", file: str = "", rule: str = ""):
@@ -465,7 +514,6 @@ class Report:
             n_errored = sum(1 for i in items if i["kind"] == "errored")
 
             if n_failed == 0 and n_errored == 0 and n_skipped == 0:
-                # All green — collapse to one line
                 body.append(f"\u2502 {section} \u2705 {n_passed}/{len(items)}")
                 continue
 
