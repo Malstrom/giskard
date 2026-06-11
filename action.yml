@@ -1,18 +1,18 @@
 name: giskard
-description: Validate a repo against zeroth universal rules
+description: "Validate a repo against zeroth universal rules"
 author: Malstrom
 
 inputs:
   repo:
-    description: Path to the repo to validate (default: current directory)
+    description: "Path to the repo to validate (default: current directory)"
     required: false
     default: "."
   framework:
-    description: Optional framework-specific checks (e.g. dojo, aurora, tensho)
+    description: "Optional framework-specific checks (e.g. dojo, aurora, tensho)"
     required: false
     default: ""
   github-token:
-    description: GitHub token to open issues on failure
+    description: "GitHub token to open issues on failure"
     required: false
     default: ""
 
