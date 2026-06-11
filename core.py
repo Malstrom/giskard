@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""
+core.py — shared internals for giskard.
+
+Contains: proxy registry, Report, run_check.
+No CLI, no framework logic, no imports from giskard or checks/.
+All modules (checks/*.py, giskard.py) import from here.
+"""
+
+import re
+import traceback
+import yaml
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Sentinel for proxy execution errors (distinct from False = check failed)
+ERROR = "error"
+
+
+# ---------------------------------------------------------------------------
+# File helpers
+# ---------------------------------------------------------------------------
+
+def _read_file(repo: Path, filename: str) -> str:
+    p = repo / filename
+    return p.read_text() if p.exists() else ""
+
+
+def _parse_yaml(repo: Path, filename: str) -> dict:
+    content = _read_file(repo, filename)
+    if not content:
+        return {}
+    try:
+        parsed = yaml.safe_load(content)
+        return parsed if isinstance(parsed, dict) else {}
+    except yaml.YAMLError:
+        return {}
+
+
+def _normalize(text: str) -> list[str]:
+    return [line.rstrip() for line in text.splitlines()]
+
+
+def _fetch_url(url: str) -> str:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url) as r:
+            return r.read().decode()
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Proxy implementations
+# ---------------------------------------------------------------------------
+
+def proxy_file_exists(repo: Path, check: dict) -> tuple:
+    target = check["target"]
+    must_exist = check.get("must_exist", True)
+    path = repo / target
+    result = path.exists() == must_exist
+    return result, ""
+
+
+def proxy_dir_has_subfolders(repo: Path, check: dict) -> tuple:
+    target = repo / check["target"].rstrip("/")
+    if not target.is_dir():
+        return False, ""
+    subs = [d for d in target.iterdir() if d.is_dir()]
+    return len(subs) > 0, f"{len(subs)} subfolder(s) found"
+
+
+def proxy_dir_has_templates(repo: Path, check: dict) -> tuple:
+    target = repo / check["target"].rstrip("/")
+    if not target.is_dir():
+        return False, ""
+    required = check.get("required_files", [])
+    missing = [f for f in required if not (target / f).exists()]
+    if missing:
+        print(f"    missing templates: {', '.join(missing)}")
+    return len(missing) == 0, ""
+
+
+def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
+    ZEROTH_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
+    framework = check["framework"]
+    template = check["template"]
+    zeroth_ref = check.get("zeroth_ref", "main")
+    url = f"{ZEROTH_BASE.format(ref=zeroth_ref)}/{framework}/templates/{template}"
+    zeroth_content = _fetch_url(url)
+    if not zeroth_content:
+        return None, f"could not fetch {url}"
+    repo_content = _read_file(repo, f"templates/{template}")
+    if not repo_content:
+        return False, "template missing in repo"
+    zeroth_lines = _normalize(zeroth_content)
+    repo_lines = _normalize(repo_content)
+    match = zeroth_lines == repo_lines
+    if not match:
+        diff_count = sum(1 for a, b in zip(zeroth_lines, repo_lines) if a != b)
+        length_diff = len(zeroth_lines) - len(repo_lines)
+        detail = f"{diff_count} line(s) differ"
+        if length_diff != 0:
+            detail += f", {abs(length_diff)} line(s) {'extra in zeroth' if length_diff > 0 else 'extra in repo'}"
+        return False, detail
+    return True, f"{len(zeroth_lines)} lines match"
+
+
+def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    key = check["key"]
+    return key in parsed, ""
+
+
+def proxy_yaml_key_absent(repo: Path, check: dict) -> tuple:
+    """Passes if the key does NOT exist. Used for forbidden fields."""
+    parsed = _parse_yaml(repo, check["file"])
+    keys = check["key"].split(".")
+    val = parsed
+    for k in keys:
+        if not isinstance(val, dict):
+            return True, "parent key absent"
+        if k not in val:
+            return True, ""
+        val = val[k]
+    present = True
+    if present:
+        print(f"    forbidden key '{check['key']}' is present")
+    return False, f"forbidden key '{check['key']}' found"
+
+
+def proxy_yaml_key_equals(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    keys = check["key"].split(".")
+    val = parsed
+    for k in keys:
+        if not isinstance(val, dict):
+            return False, ""
+        val = val.get(k)
+    result = val == check["expected"]
+    return result, f"got '{val}', expected '{check['expected']}'"
+
+
+def proxy_yaml_key_contains(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    keys = check["key"].split(".")
+    val = parsed
+    for k in keys:
+        if not isinstance(val, dict):
+            return False, ""
+        val = val.get(k)
+    result = check["contains"] in str(val or "")
+    return result, ""
+
+
+def proxy_yaml_first_key(repo: Path, check: dict) -> tuple:
+    content = _read_file(repo, check["file"])
+    lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
+    first_key = lines[0].split(":")[0].strip() if lines else ""
+    result = first_key == check["expected"]
+    return result, f"first key is '{first_key}'"
+
+
+def proxy_yaml_levels_valid(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    keys = check["key"].split(".")
+    val = parsed
+    for k in keys:
+        val = (val or {}).get(k)
+    if not isinstance(val, dict):
+        return None, "field missing or not a map"
+    allowed = set(check["allowed"])
+    bad = [v for v in val.values() if v not in allowed]
+    if bad:
+        print(f"    invalid values: {bad}")
+    return len(bad) == 0, ""
+
+
+def proxy_yaml_subkeys_exist(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, check["file"])
+    keys = check["key"].split(".")
+    val = parsed
+    for k in keys:
+        if not isinstance(val, dict):
+            return False, ""
+        val = val.get(k)
+    if not isinstance(val, dict):
+        return False, ""
+    required = check.get("required_subkeys", [])
+    missing = [k for k in required if k not in val]
+    if missing:
+        print(f"    missing subkeys: {missing}")
+    return len(missing) == 0, ""
+
+
+def proxy_scenario_present(repo: Path, check: dict) -> tuple:
+    sc = _parse_yaml(repo, ".scenarios.yml")
+    rs = sc.get("required_scenarios", {})
+    name = check["scenario"]
+    present = name in (rs or {})
+    return present, ""
+
+
+def proxy_scenario_last(repo: Path, check: dict) -> tuple:
+    sc = _parse_yaml(repo, ".scenarios.yml")
+    rs = sc.get("required_scenarios", {}) or {}
+    name = check["scenario"]
+    keys = list(rs.keys())
+    result = keys[-1] == name if keys else False
+    return result, f"last is '{keys[-1] if keys else 'none'}'"
+
+
+def proxy_scenario_not_present(repo: Path, check: dict) -> tuple:
+    sc = _parse_yaml(repo, ".scenarios.yml")
+    rs = sc.get("required_scenarios", {}) or {}
+    name = check["scenario"]
+    return name not in rs, ""
+
+
+def proxy_scenario_input_sources(repo: Path, check: dict) -> tuple:
+    sc = _parse_yaml(repo, ".scenarios.yml")
+    rs = sc.get("required_scenarios", {}) or {}
+    name = check["scenario"]
+    if name not in rs:
+        return False, "scenario not found"
+    actual = len((rs[name] or {}).get("input_sources", []))
+    expected = check["min_count"]
+    return actual >= expected, f"{actual}/{expected} input_sources"
+
+
+def proxy_scenario_no_forbidden_modules(repo: Path, check: dict) -> tuple:
+    """Verifies that handler actions do not contain say, ask, or propose."""
+    FORBIDDEN = {"say", "ask", "propose"}
+    parsed = _parse_yaml(repo, ".agent.yml")
+    handlers = parsed.get("handlers", {}) or {}
+    violations = []
+    for handler_name, handler_body in handlers.items():
+        if not isinstance(handler_body, dict):
+            continue
+        actions = handler_body.get("actions", []) or []
+        for action in actions:
+            if isinstance(action, dict):
+                keys = set(action.keys()) & FORBIDDEN
+                if keys:
+                    violations.append(f"{handler_name}: {keys}")
+            elif isinstance(action, str) and action in FORBIDDEN:
+                violations.append(f"{handler_name}: '{action}'")
+    if violations:
+        print(f"    forbidden modules in handlers: {violations}")
+    return len(violations) == 0, ""
+
+
+def proxy_handler_present(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, ".agent.yml")
+    h = parsed.get("handlers", {}) or {}
+    name = check["handler"]
+    return name in h, ""
+
+
+def proxy_handler_has_key(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, ".agent.yml")
+    h = (parsed.get("handlers", {}) or {}).get(check["handler"], {}) or {}
+    return check["key"] in h, ""
+
+
+def proxy_text_search(repo: Path, check: dict) -> tuple:
+    content = _read_file(repo, check["file"])
+    terms = check["terms"]
+    missing = [t for t in terms if t not in content]
+    if missing:
+        print(f"    missing terms: {missing}")
+    return len(missing) == 0, f"searched in {check['file']}"
+
+
+def proxy_token_count(repo: Path, check: dict) -> tuple:
+    content = _read_file(repo, check["file"])
+    token = check["token"]
+    count = content.count(token)
+    expected = check["expected"]
+    if count != expected:
+        print(f"    found {count} '{token}' tokens, expected {expected}")
+    return count == expected, f"{count}/{expected} tokens"
+
+
+def proxy_file_access_mode(repo: Path, check: dict) -> tuple:
+    parsed = _parse_yaml(repo, ".agent.yml")
+    fa = parsed.get("file_access", {}) or {}
+    pattern = check["pattern"]
+    mode = check["mode"].lower()
+    all_modes = {k: v for k, v in fa.items() if isinstance(v, list)}
+    if all_modes:
+        in_correct = pattern in (all_modes.get(mode) or [])
+        in_write = pattern in (all_modes.get("write") or [])
+        if not in_correct:
+            print(f"    '{pattern}' not found in file_access.{mode}")
+        if in_write:
+            print(f"    '{pattern}' is also in file_access.write — must not be writable")
+        return in_correct and not in_write, ""
+    val = str(fa.get(pattern, "")).lower()
+    return mode in val, ""
+
+
+def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
+    content = _read_file(repo, ".agent.yml")
+    return check["contains"] in content, ""
+
+
+# ---------------------------------------------------------------------------
+# Proxy registry
+# ---------------------------------------------------------------------------
+
+PROXY_REGISTRY = {
+    "file_exists": proxy_file_exists,
+    "dir_has_subfolders": proxy_dir_has_subfolders,
+    "dir_has_templates": proxy_dir_has_templates,
+    "template_matches_zeroth": proxy_template_matches_zeroth,
+    "yaml_key_exists": proxy_yaml_key_exists,
+    "yaml_key_absent": proxy_yaml_key_absent,
+    "yaml_key_equals": proxy_yaml_key_equals,
+    "yaml_key_contains": proxy_yaml_key_contains,
+    "yaml_first_key": proxy_yaml_first_key,
+    "yaml_levels_valid": proxy_yaml_levels_valid,
+    "yaml_subkeys_exist": proxy_yaml_subkeys_exist,
+    "scenario_present": proxy_scenario_present,
+    "scenario_last": proxy_scenario_last,
+    "scenario_not_present": proxy_scenario_not_present,
+    "scenario_input_sources": proxy_scenario_input_sources,
+    "scenario_no_forbidden_modules": proxy_scenario_no_forbidden_modules,
+    "handler_present": proxy_handler_present,
+    "handler_has_key": proxy_handler_has_key,
+    "text_search": proxy_text_search,
+    "token_count": proxy_token_count,
+    "file_access_mode": proxy_file_access_mode,
+    "write_ahead_rule": proxy_write_ahead_rule,
+}
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+class Report:
+    def __init__(self, repo: Path):
+        self.repo = repo
+        self.lines = []
+        self.passed = 0
+        self.failed = 0
+        self.skipped = 0
+        self.errored = 0
+        self.failures = []  # list of {label, file, rule} for issue creation
+        self.ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    def add(self, label: str, result, note: str = "", file: str = "", rule: str = ""):
+        if result is True:
+            self.passed += 1
+            icon = "\u2705"
+        elif result is ERROR:
+            self.errored += 1
+            icon = "\U0001f4a5"
+        elif result is False:
+            self.failed += 1
+            icon = "\u274c"
+            self.failures.append({"label": label, "file": file, "rule": rule})
+        else:
+            self.skipped += 1
+            icon = "\u26a0\ufe0f"
+        suffix = f" — {note}" if note else ""
+        line = f"  {icon} {label}{suffix}"
+        print(line)
+        self.lines.append(line)
+
+    def section(self, name: str):
+        line = f"\n\u2502 {name}"
+        print(line)
+        self.lines.append(line)
+
+    def save(self) -> Path:
+        out = self.repo / "giskard-report.md"
+        if self.errored > 0:
+            status = "\U0001f4a5 error"
+        elif self.failed > 0:
+            status = "\u274c failed"
+        else:
+            status = "\u2705 passed"
+        header = [
+            "# giskard report",
+            "",
+            f"- **repo**: {self.repo.name}",
+            f"- **date**: {self.ts}",
+            f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped / {self.errored} errored",
+            "",
+            "## checks",
+            "",
+        ]
+        with open(out, "w") as f:
+            f.write("\n".join(header) + "\n")
+            f.write("\n".join(self.lines) + "\n")
+        print(f"\n[giskard] report written to {out}")
+        return out
+
+    @property
+    def ok(self) -> bool:
+        return self.failed == 0 and self.errored == 0
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
+def run_check(repo: Path, check: dict, report: Report):
+    label = check.get("label", str(check))
+    proxy_name = check.get("proxy")
+    if not proxy_name:
+        report.add(label, None, "no proxy defined")
+        return
+    fn = PROXY_REGISTRY.get(proxy_name)
+    if not fn:
+        report.add(label, None, f"unknown proxy '{proxy_name}'")
+        return
+    try:
+        result, note = fn(repo, check)
+        report.add(
+            label, result, note,
+            file=check.get("file", check.get("target", "")),
+            rule=check.get("rule", ""),
+        )
+    except Exception as e:
+        tb = traceback.format_exc().strip().splitlines()[-1]
+        report.add(label, ERROR, f"{tb}")
