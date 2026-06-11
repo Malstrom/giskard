@@ -41,101 +41,48 @@ Source scenarios: session_start (reads .aurora.yml, clients/),
                   work_session (reads playbooks/{work_type}.yml)
 
 .aurora.yml must exist and have: version, owner, language, clients, work_types
-  → session_start reads .aurora.yml on every open. Missing = agent cannot start.
-  → clients list is used to enumerate open tasks and route work.
-
-clients/ must exist
-  → session_start enumerates clients/. Missing = no work can be routed.
-
-contacts/ must exist
-  → delegate_task reads contacts/. Missing = delegation is blind.
-
-log/ must exist
-  → log_work, delegate_task, rate_work all write to log/{slug}/.
-  → Missing = no traceability.
-
-playbooks/ must exist
-  → work_session reads playbooks/{work_type}.yml.
-  → Missing = no playbook can be executed.
-
-templates/ must have: inbox.yml, log.yml, log_index.yml, contact.yml,
-                      client_context.yml, playbook.yml, playbook_log.yml,
-                      output_csv.md, output_email.md, output_report.md
-  → ingest_task creates inbox files from templates/inbox.yml.
-  → log_work and reindex use templates/log.yml and log_index.yml.
-  → Missing template = agent cannot create the file type safely.
-
+clients/, contacts/, log/, playbooks/ must exist
+templates/ must have all required files
 handler reindex_check must be present in .agent.yml
-  → log_work calls reindex when unindexed_log_count > 30.
-  → reindex_check handler drives this automation.
-  → Missing = log index silently grows unbounded.
 
-## 2 — Template key validation (inferred at runtime)
+## 2 — Generated file key validation (local, no network)
 
-For every yml template in templates/:
-  → Keys are fetched from the canonical template in Malstrom/aurora at runtime.
-  → No hardcoded key lists. Check self-updates when framework templates change.
+For every generated file type, root keys are compared against the
+corresponding local template. The template is the source of truth.
+
+Mapping:
+  clients/*/inbox/*.yml      → templates/inbox.yml
+  contacts/*.yml             → templates/contact.yml
+  log/*/*.yml                → templates/log.yml
+  log/_index/*.yml           → templates/log_index.yml
+  clients/*/playbooks/*.yml  → templates/playbook.yml
+  log/*/*_*.yml              → templates/playbook_log.yml
+
   → Missing key = agent creates files with missing fields = silent data loss.
+  → Skipped if no generated files exist yet (new repo).
 
 ## 3 — Referential integrity (aggregated, mixed ERROR/WARNING)
 
-Source scenarios: ingest_task (creates inbox with client+contact fields),
-                  delegate_task (reads contacts/, updates inbox assigned_to),
-                  rate_work (reads contacts/{contact_file}),
-                  log_work (writes log/{slug}/)
-
 For every clients/*/inbox/*.yml:
-
   client dir missing — ERROR
-    inbox file declares client: {slug} but clients/{slug}/ does not exist.
-    → work_session, delegate_task, all scenarios using {slug} would fail.
-    → Blocking: no work can be executed for this client.
-
   contact missing — WARNING
-    inbox file declares contact: {slug} but contacts/{slug}.yml missing.
-    → draft_reply, rate_work, delegate_task cannot load contact preferences.
-    → Non-blocking: task can still be executed, communication is degraded.
-
   assigned_to missing — WARNING
-    inbox file declares assigned_to: {slug} but contacts/{slug}.yml missing.
-    → delegate_task and rate_work cannot resolve the assignee.
-    → Non-blocking: task is recorded, traceability is degraded.
-
   log dir missing for worked client — WARNING
-    inbox status != open but log/{slug}/ does not exist.
-    → log_work, delegate_task, rate_work all write to log/{slug}/.
-    → Non-blocking at check time (dir may be created on first write),
-      but indicates a traceability gap in an already-worked client.
 
 ## 4 — Playbook structure (ERROR/WARNING)
 
-Source scenarios: work_session (reads playbooks/{work_type}.yml and
-                  implicitly clients/{slug}/playbooks/{work_type}.yml for overrides)
-
 For every clients/*/playbooks/*.yml:
-
   extends missing — ERROR
-    Client playbook has no extends field.
-    → work_session cannot merge general + client steps safely.
-    → Unanchored playbook: unknown which general playbook it overrides.
-
   extends target missing — ERROR
-    Client playbook extends: {name} but playbooks/{name}.yml does not exist.
-    → work_session would load client override but find no general steps to merge.
-    → Playbook execution would be partial or undefined.
-
   client field mismatch — WARNING
-    client: {declared} does not match the containing clients/{dir}/ directory.
-    → Non-blocking but indicates a copy-paste error or misplaced file.
 
 ================================================================================
 KNOWN GAPS / FUTURE CHECKS
 ================================================================================
 
-- output/ file naming: {date}_{playbook}_{type}.{ext} convention not yet validated
-- contacts/{slug}.yml internal structure (required fields) not yet validated
+- output/ file naming convention not yet validated
+- contacts/{slug}.yml internal structure not yet validated
 - clients/{slug}/context.yml existence not yet validated
-  (read by work_session and summarize_client)
 
 ================================================================================
 """
@@ -156,16 +103,6 @@ REQUIRED_TEMPLATES = [
     "output_csv.md",
     "output_email.md",
     "output_report.md",
-]
-
-YML_TEMPLATES = [
-    "inbox.yml",
-    "log.yml",
-    "log_index.yml",
-    "contact.yml",
-    "client_context.yml",
-    "playbook.yml",
-    "playbook_log.yml",
 ]
 
 STRUCTURE_CHECKS = [
@@ -255,16 +192,49 @@ STRUCTURE_CHECKS = [
     },
 ]
 
-TEMPLATE_CHECKS = [
+TEMPLATE_KEY_CHECKS = [
     {
-        "label": f"templates/{t} keys match aurora canonical",
-        "proxy": "template_keys_match_framework",
-        "framework": "aurora",
-        "template": t,
-        "file": f"templates/{t}",
+        "label": "inbox files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "clients/*/inbox/*.yml",
+        "template": "templates/inbox.yml",
         "rule": "aurora/templates.yml",
-    }
-    for t in YML_TEMPLATES
+    },
+    {
+        "label": "contact files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "contacts/*.yml",
+        "template": "templates/contact.yml",
+        "rule": "aurora/templates.yml",
+    },
+    {
+        "label": "log session files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "log/*/*.yml",
+        "template": "templates/log.yml",
+        "rule": "aurora/templates.yml",
+    },
+    {
+        "label": "log index files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "log/_index/*.yml",
+        "template": "templates/log_index.yml",
+        "rule": "aurora/templates.yml",
+    },
+    {
+        "label": "client playbook files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "clients/*/playbooks/*.yml",
+        "template": "templates/playbook.yml",
+        "rule": "aurora/templates.yml",
+    },
+    {
+        "label": "playbook log files match template keys",
+        "proxy": "generated_files_match_template",
+        "glob": "log/*/*_*.yml",
+        "template": "templates/playbook_log.yml",
+        "rule": "aurora/templates.yml",
+    },
 ]
 
 
@@ -333,7 +303,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_client_dirs:
         for slug, files in sorted(missing_client_dirs.items()):
-            detail = f"clients/{slug}/ missing \u2190 " + ", ".join(files)
+            detail = f"clients/{slug}/ missing ← " + ", ".join(files)
             report.add(f"client dir missing: {slug}", False, detail, rule="aurora/structure.yml")
             _gh_annotation("error", f"giskard ERROR: client dir 'clients/{slug}/' missing", files[0])
     else:
@@ -341,7 +311,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_contacts:
         for contact, files in sorted(missing_contacts.items()):
-            detail = f"contacts/{contact}.yml missing \u2190 " + ", ".join(files)
+            detail = f"contacts/{contact}.yml missing ← " + ", ".join(files)
             report.add(f"contact missing: {contact}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing", files[0])
     else:
@@ -349,7 +319,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_assigned:
         for contact, files in sorted(missing_assigned.items()):
-            detail = f"contacts/{contact}.yml missing (assigned_to) \u2190 " + ", ".join(files)
+            detail = f"contacts/{contact}.yml missing (assigned_to) ← " + ", ".join(files)
             report.add(f"assigned_to missing: {contact}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing (assigned_to)", files[0])
     else:
@@ -357,7 +327,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_logs:
         for slug, files in sorted(missing_logs.items()):
-            detail = f"log/{slug}/ missing \u2190 " + ", ".join(files)
+            detail = f"log/{slug}/ missing ← " + ", ".join(files)
             report.add(f"log dir missing for worked client: {slug}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: log/{slug}/ missing", files[0])
     else:
@@ -424,7 +394,7 @@ def _check_playbook_structure(repo: Path, report: Report) -> None:
 
     if missing_parents:
         for parent, files in sorted(missing_parents.items()):
-            detail = f"playbooks/{parent}.yml missing \u2190 " + ", ".join(files)
+            detail = f"playbooks/{parent}.yml missing ← " + ", ".join(files)
             report.add(f"extends target missing: {parent}", False, detail, rule="aurora/structure.yml")
             _gh_annotation("error", f"giskard ERROR: playbooks/{parent}.yml missing", files[0])
     else:
@@ -444,12 +414,12 @@ def run(repo: Path, report: Report) -> None:
     for check in STRUCTURE_CHECKS:
         run_check(repo, check, report)
 
-    report.section("aurora \u2014 templates")
-    for check in TEMPLATE_CHECKS:
+    report.section("aurora — templates")
+    for check in TEMPLATE_KEY_CHECKS:
         run_check(repo, check, report)
 
-    report.section("aurora \u2014 referential integrity")
+    report.section("aurora — referential integrity")
     _check_referential_integrity(repo, report)
 
-    report.section("aurora \u2014 playbook structure")
+    report.section("aurora — playbook structure")
     _check_playbook_structure(repo, report)
