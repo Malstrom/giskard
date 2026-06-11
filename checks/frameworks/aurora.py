@@ -7,6 +7,7 @@ Runs after universal rules (layer 1). Validates aurora-specific structure:
 - templates/ completeness
 - handler reindex_check
 - referential integrity: inbox → contacts, clients, log (aggregated)
+- playbook two-level structure: client playbooks → general playbooks
 """
 
 import yaml
@@ -111,7 +112,7 @@ STRUCTURE_CHECKS = [
 ]
 
 
-def _read_inbox_file(path: Path) -> dict:
+def _read_yaml_file(path: Path) -> dict:
     try:
         content = path.read_text(encoding="utf-8")
         parsed = yaml.safe_load(content)
@@ -125,26 +126,15 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
     Aggregated referential integrity check.
     Iterates all clients/*/inbox/*.yml, collects anomalies,
     then emits one result per category.
-
-    Categories:
-    - client dirs missing   → ERROR
-    - contacts missing      → WARNING
-    - assigned_to missing   → WARNING
-    - log dirs missing      → WARNING
     """
     clients_dir = repo / "clients"
     if not clients_dir.is_dir():
         return
 
-    # slug → [rel_path, ...]
     missing_client_dirs: dict = defaultdict(list)
-    # contact → [rel_path, ...]
     missing_contacts: dict = defaultdict(list)
-    # contact → [rel_path, ...]
     missing_assigned: dict = defaultdict(list)
-    # slug → [rel_path, ...]
     missing_logs: dict = defaultdict(list)
-
     total_files = 0
 
     for client_dir in sorted(clients_dir.iterdir()):
@@ -158,28 +148,24 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
             continue
 
         for inbox_file in sorted(inbox_files):
-            data = _read_inbox_file(inbox_file)
+            data = _read_yaml_file(inbox_file)
             rel = str(inbox_file.relative_to(repo))
             total_files += 1
 
             slug = data.get("client") or client_dir.name
 
-            # 1 — client dir
             if not (repo / "clients" / slug).is_dir():
                 missing_client_dirs[slug].append(rel)
 
-            # 2 — contact
             contact = data.get("contact")
             if contact and not (repo / "contacts" / f"{contact}.yml").exists():
                 missing_contacts[contact].append(rel)
 
-            # 3 — assigned_to
             assigned_to = data.get("assigned_to")
             if assigned_to and assigned_to != "null":
                 if not (repo / "contacts" / f"{assigned_to}.yml").exists():
                     missing_assigned[assigned_to].append(rel)
 
-            # 4 — log dir when status != open
             status = data.get("status", "open")
             if status and status != "open":
                 if not (repo / "log" / slug).is_dir():
@@ -189,9 +175,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
         report.add("referential integrity", None, "no inbox files found — skipped")
         return
 
-    # --- emit aggregated results ---
-
-    # client dirs
     if missing_client_dirs:
         for slug, files in sorted(missing_client_dirs.items()):
             detail = f"clients/{slug}/ missing ← " + ", ".join(files)
@@ -200,7 +183,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
     else:
         report.add(f"all client dirs aligned ({total_files} files)", True)
 
-    # contacts
     if missing_contacts:
         for contact, files in sorted(missing_contacts.items()):
             detail = f"contacts/{contact}.yml missing ← " + ", ".join(files)
@@ -209,7 +191,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
     else:
         report.add(f"all contacts resolved ({total_files} files)", True)
 
-    # assigned_to
     if missing_assigned:
         for contact, files in sorted(missing_assigned.items()):
             detail = f"contacts/{contact}.yml missing (assigned_to) ← " + ", ".join(files)
@@ -218,7 +199,6 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
     else:
         report.add(f"all assigned_to resolved ({total_files} files)", True)
 
-    # log dirs
     if missing_logs:
         for slug, files in sorted(missing_logs.items()):
             detail = f"log/{slug}/ missing ← " + ", ".join(files)
@@ -228,6 +208,89 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
         report.add(f"all log dirs present for worked clients ({total_files} files)", True)
 
 
+def _check_playbook_structure(repo: Path, report: Report) -> None:
+    """
+    Validates two-level playbook structure.
+
+    For every file in clients/*/playbooks/*.yml:
+    - A: 'extends' field present           → ERROR if missing
+    - B: playbooks/{extends}.yml exists    → ERROR if missing
+    - C: 'client' field matches dir name   → WARNING if mismatch
+
+    Skipped if no client playbooks exist.
+    """
+    clients_dir = repo / "clients"
+    if not clients_dir.is_dir():
+        return
+
+    missing_extends: list = []        # rel paths with no extends field
+    missing_parents: dict = defaultdict(list)   # parent_name -> [rel, ...]
+    client_mismatch: list = []        # (declared, dir_name, rel)
+    total_files = 0
+
+    for client_dir in sorted(clients_dir.iterdir()):
+        if not client_dir.is_dir():
+            continue
+        pb_dir = client_dir / "playbooks"
+        if not pb_dir.is_dir():
+            continue
+        pb_files = [f for f in pb_dir.iterdir() if f.suffix == ".yml"]
+        if not pb_files:
+            continue
+
+        for pb_file in sorted(pb_files):
+            data = _read_yaml_file(pb_file)
+            rel = str(pb_file.relative_to(repo))
+            total_files += 1
+
+            # A — extends present
+            extends = data.get("extends")
+            if not extends:
+                missing_extends.append(rel)
+            else:
+                # B — parent playbook exists
+                parent_path = repo / "playbooks" / f"{extends}.yml"
+                if not parent_path.exists():
+                    missing_parents[extends].append(rel)
+
+            # C — client field matches dir
+            declared_client = data.get("client")
+            if declared_client and declared_client != client_dir.name:
+                client_mismatch.append((declared_client, client_dir.name, rel))
+
+    if total_files == 0:
+        report.add("playbook structure", None, "no client playbooks found — skipped")
+        return
+
+    # emit aggregated results
+
+    # A
+    if missing_extends:
+        for rel in sorted(missing_extends):
+            report.add(f"extends missing: {rel}", False, f"'extends' field required in client playbook", file=rel, rule="aurora/structure.yml")
+            _gh_annotation("error", f"giskard ERROR: 'extends' missing in {rel}", rel)
+    else:
+        report.add(f"all client playbooks have extends ({total_files} files)", True)
+
+    # B
+    if missing_parents:
+        for parent, files in sorted(missing_parents.items()):
+            detail = f"playbooks/{parent}.yml missing ← " + ", ".join(files)
+            report.add(f"extends target missing: {parent}", False, detail, rule="aurora/structure.yml")
+            _gh_annotation("error", f"giskard ERROR: playbooks/{parent}.yml missing", files[0])
+    else:
+        report.add(f"all extends targets exist ({total_files} files)", True)
+
+    # C
+    if client_mismatch:
+        for declared, dir_name, rel in sorted(client_mismatch):
+            msg = f"declared 'client: {declared}' but in clients/{dir_name}/"
+            report.add(f"client field mismatch: {declared} vs {dir_name}", None, msg, file=rel, rule="aurora/structure.yml")
+            _gh_annotation("warning", f"giskard WARNING: {msg} in {rel}", rel)
+    else:
+        report.add(f"all client playbook client fields match dir ({total_files} files)", True)
+
+
 def run(repo: Path, report: Report) -> None:
     report.section("aurora")
     for check in STRUCTURE_CHECKS:
@@ -235,3 +298,6 @@ def run(repo: Path, report: Report) -> None:
 
     report.section("aurora — referential integrity")
     _check_referential_integrity(repo, report)
+
+    report.section("aurora — playbook structure")
+    _check_playbook_structure(repo, report)
