@@ -114,6 +114,39 @@ def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
     return True, f"{len(zeroth_lines)} lines match"
 
 
+def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
+    """Fetches canonical yml template from the framework repo at runtime,
+    extracts its root keys, and verifies the local template has them all.
+    No hardcoded key lists required in the check definition.
+    """
+    framework = check["framework"]
+    template = check["template"]
+    ref = check.get("ref", "main")
+    url = f"https://raw.githubusercontent.com/Malstrom/{framework}/{ref}/templates/{template}"
+    canonical_content = _fetch_url(url)
+    if not canonical_content:
+        return None, f"could not fetch canonical template from {url}"
+    try:
+        canonical = yaml.safe_load(canonical_content)
+        canonical_keys = set(canonical.keys()) if isinstance(canonical, dict) else set()
+    except yaml.YAMLError:
+        return None, f"canonical template is not valid YAML: {url}"
+    if not canonical_keys:
+        return None, "canonical template has no root keys — skipped"
+    local_path = repo / "templates" / template
+    if not local_path.exists():
+        return ERROR, f"templates/{template} not found"
+    try:
+        local = yaml.safe_load(local_path.read_text(encoding="utf-8"))
+        local_keys = set(local.keys()) if isinstance(local, dict) else set()
+    except yaml.YAMLError:
+        return ERROR, f"templates/{template} is not valid YAML"
+    missing = canonical_keys - local_keys
+    if missing:
+        print(f"    missing keys in templates/{template}: {sorted(missing)}")
+    return len(missing) == 0, ""
+
+
 def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
     parsed = _parse_yaml(repo, check["file"])
     key = check["key"]
@@ -322,6 +355,7 @@ PROXY_REGISTRY = {
     "dir_has_subfolders": proxy_dir_has_subfolders,
     "dir_has_templates": proxy_dir_has_templates,
     "template_matches_zeroth": proxy_template_matches_zeroth,
+    "template_keys_match_framework": proxy_template_keys_match_framework,
     "yaml_key_exists": proxy_yaml_key_exists,
     "yaml_key_absent": proxy_yaml_key_absent,
     "yaml_key_equals": proxy_yaml_key_equals,
@@ -350,7 +384,8 @@ PROXY_REGISTRY = {
 class Report:
     def __init__(self, repo: Path):
         self.repo = repo
-        self.lines = []
+        self.entries = []
+        self.current_section = None
         self.passed = 0
         self.failed = 0
         self.skipped = 0
@@ -362,9 +397,11 @@ class Report:
         if result is True:
             self.passed += 1
             icon = "\u2705"
+            kind = "passed"
         elif result is ERROR:
             self.errored += 1
             icon = "\U0001f4a5"
+            kind = "errored"
             msg = f"giskard error: {label}"
             if note:
                 msg += f" — {note}"
@@ -372,6 +409,7 @@ class Report:
         elif result is False:
             self.failed += 1
             icon = "\u274c"
+            kind = "failed"
             self.failures.append({"label": label, "file": file, "rule": rule})
             msg = f"giskard FAILED: {label}"
             if note:
@@ -382,15 +420,19 @@ class Report:
         else:
             self.skipped += 1
             icon = "\u26a0\ufe0f"
+            kind = "skipped"
         suffix = f" — {note}" if note else ""
         line = f"  {icon} {label}{suffix}"
         print(line)
-        self.lines.append(line)
+        self.entries.append({
+            "section": self.current_section or "checks",
+            "kind": kind,
+            "line": line,
+        })
 
     def section(self, name: str):
-        line = f"\n\u2502 {name}"
-        print(line)
-        self.lines.append(line)
+        self.current_section = name
+        print(f"\n\u2502 {name}")
 
     def save(self) -> Path:
         out = self.repo / "giskard-report.md"
@@ -410,9 +452,37 @@ class Report:
             "## checks",
             "",
         ]
+
+        by_section = {}
+        for e in self.entries:
+            by_section.setdefault(e["section"], []).append(e)
+
+        body = []
+        for section, items in by_section.items():
+            n_passed = sum(1 for i in items if i["kind"] == "passed")
+            n_failed = sum(1 for i in items if i["kind"] == "failed")
+            n_skipped = sum(1 for i in items if i["kind"] == "skipped")
+            n_errored = sum(1 for i in items if i["kind"] == "errored")
+
+            if n_failed == 0 and n_errored == 0 and n_skipped == 0:
+                # All green — collapse to one line
+                body.append(f"\u2502 {section} \u2705 {n_passed}/{len(items)}")
+                continue
+
+            section_status = "\u274c" if (n_failed or n_errored) else "\u26a0\ufe0f"
+            body.append(
+                f"\u2502 {section} {section_status} "
+                f"{n_passed} passed / {n_failed} failed / {n_skipped} skipped / {n_errored} errored"
+            )
+            for item in items:
+                if item["kind"] != "passed":
+                    body.append(item["line"])
+            if n_passed > 0:
+                body.append(f"  \u2139\ufe0f {n_passed} passed checks hidden")
+            body.append("")
+
         with open(out, "w") as f:
-            f.write("\n".join(header) + "\n")
-            f.write("\n".join(self.lines) + "\n")
+            f.write("\n".join(header + body).rstrip() + "\n")
         print(f"\n[giskard] report written to {out}")
         return out
 

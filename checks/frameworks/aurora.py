@@ -59,7 +59,8 @@ playbooks/ must exist
   → Missing = no playbook can be executed.
 
 templates/ must have: inbox.yml, log.yml, log_index.yml, contact.yml,
-                      client_context.yml, playbook.yml
+                      client_context.yml, playbook.yml, playbook_log.yml,
+                      output_csv.md, output_email.md, output_report.md
   → ingest_task creates inbox files from templates/inbox.yml.
   → log_work and reindex use templates/log.yml and log_index.yml.
   → Missing template = agent cannot create the file type safely.
@@ -69,7 +70,14 @@ handler reindex_check must be present in .agent.yml
   → reindex_check handler drives this automation.
   → Missing = log index silently grows unbounded.
 
-## 2 — Referential integrity (aggregated, mixed ERROR/WARNING)
+## 2 — Template key validation (inferred at runtime)
+
+For every yml template in templates/:
+  → Keys are fetched from the canonical template in Malstrom/aurora at runtime.
+  → No hardcoded key lists. Check self-updates when framework templates change.
+  → Missing key = agent creates files with missing fields = silent data loss.
+
+## 3 — Referential integrity (aggregated, mixed ERROR/WARNING)
 
 Source scenarios: ingest_task (creates inbox with client+contact fields),
                   delegate_task (reads contacts/, updates inbox assigned_to),
@@ -99,7 +107,7 @@ For every clients/*/inbox/*.yml:
     → Non-blocking at check time (dir may be created on first write),
       but indicates a traceability gap in an already-worked client.
 
-## 3 — Playbook structure (ERROR/WARNING)
+## 4 — Playbook structure (ERROR/WARNING)
 
 Source scenarios: work_session (reads playbooks/{work_type}.yml and
                   implicitly clients/{slug}/playbooks/{work_type}.yml for overrides)
@@ -125,8 +133,6 @@ KNOWN GAPS / FUTURE CHECKS
 ================================================================================
 
 - output/ file naming: {date}_{playbook}_{type}.{ext} convention not yet validated
-- playbook execution log: log/{client}/{date}_{playbook}.yml not yet validated
-- templates/output_*.md completeness not yet validated
 - contacts/{slug}.yml internal structure (required fields) not yet validated
 - clients/{slug}/context.yml existence not yet validated
   (read by work_session and summarize_client)
@@ -146,6 +152,20 @@ REQUIRED_TEMPLATES = [
     "contact.yml",
     "client_context.yml",
     "playbook.yml",
+    "playbook_log.yml",
+    "output_csv.md",
+    "output_email.md",
+    "output_report.md",
+]
+
+YML_TEMPLATES = [
+    "inbox.yml",
+    "log.yml",
+    "log_index.yml",
+    "contact.yml",
+    "client_context.yml",
+    "playbook.yml",
+    "playbook_log.yml",
 ]
 
 STRUCTURE_CHECKS = [
@@ -235,6 +255,18 @@ STRUCTURE_CHECKS = [
     },
 ]
 
+TEMPLATE_CHECKS = [
+    {
+        "label": f"templates/{t} keys match aurora canonical",
+        "proxy": "template_keys_match_framework",
+        "framework": "aurora",
+        "template": t,
+        "file": f"templates/{t}",
+        "rule": "aurora/templates.yml",
+    }
+    for t in YML_TEMPLATES
+]
+
 
 def _read_yaml_file(path: Path) -> dict:
     try:
@@ -301,7 +333,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_client_dirs:
         for slug, files in sorted(missing_client_dirs.items()):
-            detail = f"clients/{slug}/ missing ← " + ", ".join(files)
+            detail = f"clients/{slug}/ missing \u2190 " + ", ".join(files)
             report.add(f"client dir missing: {slug}", False, detail, rule="aurora/structure.yml")
             _gh_annotation("error", f"giskard ERROR: client dir 'clients/{slug}/' missing", files[0])
     else:
@@ -309,7 +341,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_contacts:
         for contact, files in sorted(missing_contacts.items()):
-            detail = f"contacts/{contact}.yml missing ← " + ", ".join(files)
+            detail = f"contacts/{contact}.yml missing \u2190 " + ", ".join(files)
             report.add(f"contact missing: {contact}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing", files[0])
     else:
@@ -317,7 +349,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_assigned:
         for contact, files in sorted(missing_assigned.items()):
-            detail = f"contacts/{contact}.yml missing (assigned_to) ← " + ", ".join(files)
+            detail = f"contacts/{contact}.yml missing (assigned_to) \u2190 " + ", ".join(files)
             report.add(f"assigned_to missing: {contact}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing (assigned_to)", files[0])
     else:
@@ -325,7 +357,7 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
 
     if missing_logs:
         for slug, files in sorted(missing_logs.items()):
-            detail = f"log/{slug}/ missing ← " + ", ".join(files)
+            detail = f"log/{slug}/ missing \u2190 " + ", ".join(files)
             report.add(f"log dir missing for worked client: {slug}", None, detail, rule="aurora/structure.yml")
             _gh_annotation("warning", f"giskard WARNING: log/{slug}/ missing", files[0])
     else:
@@ -392,7 +424,7 @@ def _check_playbook_structure(repo: Path, report: Report) -> None:
 
     if missing_parents:
         for parent, files in sorted(missing_parents.items()):
-            detail = f"playbooks/{parent}.yml missing ← " + ", ".join(files)
+            detail = f"playbooks/{parent}.yml missing \u2190 " + ", ".join(files)
             report.add(f"extends target missing: {parent}", False, detail, rule="aurora/structure.yml")
             _gh_annotation("error", f"giskard ERROR: playbooks/{parent}.yml missing", files[0])
     else:
@@ -412,8 +444,12 @@ def run(repo: Path, report: Report) -> None:
     for check in STRUCTURE_CHECKS:
         run_check(repo, check, report)
 
-    report.section("aurora — referential integrity")
+    report.section("aurora \u2014 templates")
+    for check in TEMPLATE_CHECKS:
+        run_check(repo, check, report)
+
+    report.section("aurora \u2014 referential integrity")
     _check_referential_integrity(repo, report)
 
-    report.section("aurora — playbook structure")
+    report.section("aurora \u2014 playbook structure")
     _check_playbook_structure(repo, report)
