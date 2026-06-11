@@ -21,7 +21,7 @@ import importlib
 import sys
 from pathlib import Path
 
-from core import Report, ERROR
+from core import Report, ERROR, _gh_annotation
 from checks import files, agent, scenarios, connections
 
 
@@ -107,8 +107,9 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
     if framework:
         fw = load_framework_module(framework)
         if fw is None:
-            print(f"\n[giskard] WARNING: framework '{framework}' not yet supported — skipping framework-specific checks")
-            print(f"[giskard] To add support: create checks/frameworks/{framework}.py")
+            msg = f"framework '{framework}' not yet supported — skipping framework-specific checks. Add checks/frameworks/{framework}.py to enable."
+            print(f"\n[giskard] WARNING: {msg}")
+            _gh_annotation("warning", f"giskard: {msg}")
         else:
             fw.run(repo, report)
 
@@ -118,7 +119,7 @@ def run(repo_path: str, framework: str = None, github_token: str = None):
     # Always save report before exiting
     report_path = report.save()
 
-    # Print report content to stdout for inline visibility in CI
+    # Print report inline for CI log visibility
     print("\n" + "=" * 60)
     print(report_path.read_text())
     print("=" * 60)
