@@ -36,13 +36,17 @@ runs:
 
     - name: Run giskard
       shell: bash
+      env:
+        GISKARD_REPO: ${{ inputs.repo }}
+        GISKARD_FRAMEWORK: ${{ inputs.framework }}
+        GISKARD_TOKEN: ${{ inputs.github-token }}
       run: |
-        ARGS="--repo ${{ inputs.repo }}"
-        if [ -n "${{ inputs.framework }}" ]; then
-          ARGS="$ARGS --framework ${{ inputs.framework }}"
+        ARGS="--repo $GISKARD_REPO"
+        if [ -n "$GISKARD_FRAMEWORK" ]; then
+          ARGS="$ARGS --framework $GISKARD_FRAMEWORK"
         fi
-        if [ -n "${{ inputs.github-token }}" ]; then
-          ARGS="$ARGS --github-token ${{ inputs.github-token }}"
+        if [ -n "$GISKARD_TOKEN" ]; then
+          ARGS="$ARGS --github-token $GISKARD_TOKEN"
         fi
         python _giskard/giskard.py $ARGS
 
