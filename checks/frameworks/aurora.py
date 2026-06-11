@@ -6,12 +6,12 @@ Runs after universal rules (layer 1). Validates aurora-specific structure:
 - .aurora.yml structure
 - templates/ completeness
 - handler reindex_check
-- session_start reads .aurora.yml
-- referential integrity: inbox → contacts, clients, log
+- referential integrity: inbox → contacts, clients, log (aggregated)
 """
 
 import yaml
 from pathlib import Path
+from collections import defaultdict
 from core import run_check, Report, ERROR, _gh_annotation
 
 REQUIRED_TEMPLATES = [
@@ -122,19 +122,30 @@ def _read_inbox_file(path: Path) -> dict:
 
 def _check_referential_integrity(repo: Path, report: Report) -> None:
     """
-    For every inbox file in clients/*/inbox/:
-    - data['client'] dir exists in clients/     → ERROR if missing
-    - contact file exists in contacts/           → WARNING if missing
-    - assigned_to contact exists in contacts/    → WARNING if missing
-    - if status != open → log/{client}/ exists  → WARNING if missing
+    Aggregated referential integrity check.
+    Iterates all clients/*/inbox/*.yml, collects anomalies,
+    then emits one result per category.
 
-    Skipped entirely if no inbox files exist anywhere.
+    Categories:
+    - client dirs missing   → ERROR
+    - contacts missing      → WARNING
+    - assigned_to missing   → WARNING
+    - log dirs missing      → WARNING
     """
     clients_dir = repo / "clients"
     if not clients_dir.is_dir():
         return
 
-    found_any_inbox = False
+    # slug → [rel_path, ...]
+    missing_client_dirs: dict = defaultdict(list)
+    # contact → [rel_path, ...]
+    missing_contacts: dict = defaultdict(list)
+    # contact → [rel_path, ...]
+    missing_assigned: dict = defaultdict(list)
+    # slug → [rel_path, ...]
+    missing_logs: dict = defaultdict(list)
+
+    total_files = 0
 
     for client_dir in sorted(clients_dir.iterdir()):
         if not client_dir.is_dir():
@@ -146,58 +157,75 @@ def _check_referential_integrity(repo: Path, report: Report) -> None:
         if not inbox_files:
             continue
 
-        found_any_inbox = True
-
         for inbox_file in sorted(inbox_files):
             data = _read_inbox_file(inbox_file)
             rel = str(inbox_file.relative_to(repo))
+            total_files += 1
 
-            # slug from yaml 'client' field, not from the containing dir
             slug = data.get("client") or client_dir.name
 
-            # 1 — client dir declared in yaml exists
-            client_path = repo / "clients" / slug
-            if not client_path.is_dir():
-                msg = f"client dir 'clients/{slug}/' missing (declared in {rel})"
-                report.add(f"client dir exists: {slug}", False, msg, file=rel, rule="aurora/structure.yml")
-            else:
-                report.add(f"client dir exists: {slug}", True, file=rel)
+            # 1 — client dir
+            if not (repo / "clients" / slug).is_dir():
+                missing_client_dirs[slug].append(rel)
 
-            # 2 — contact field exists in contacts/
+            # 2 — contact
             contact = data.get("contact")
-            if contact:
-                contact_path = repo / "contacts" / f"{contact}.yml"
-                if not contact_path.exists():
-                    msg = f"contacts/{contact}.yml missing (referenced in {rel})"
-                    report.add(f"contact exists: {contact}", None, msg, file=rel, rule="aurora/structure.yml")
-                    _gh_annotation("warning", f"giskard WARNING: {msg}", rel)
-                else:
-                    report.add(f"contact exists: {contact}", True, file=rel)
+            if contact and not (repo / "contacts" / f"{contact}.yml").exists():
+                missing_contacts[contact].append(rel)
 
-            # 3 — assigned_to contact exists in contacts/
+            # 3 — assigned_to
             assigned_to = data.get("assigned_to")
             if assigned_to and assigned_to != "null":
-                assigned_path = repo / "contacts" / f"{assigned_to}.yml"
-                if not assigned_path.exists():
-                    msg = f"contacts/{assigned_to}.yml missing (assigned_to in {rel})"
-                    report.add(f"assigned_to exists: {assigned_to}", None, msg, file=rel, rule="aurora/structure.yml")
-                    _gh_annotation("warning", f"giskard WARNING: {msg}", rel)
-                else:
-                    report.add(f"assigned_to exists: {assigned_to}", True, file=rel)
+                if not (repo / "contacts" / f"{assigned_to}.yml").exists():
+                    missing_assigned[assigned_to].append(rel)
 
-            # 4 — if status != open, log/{slug}/ must exist
+            # 4 — log dir when status != open
             status = data.get("status", "open")
             if status and status != "open":
-                log_dir = repo / "log" / slug
-                if not log_dir.is_dir():
-                    msg = f"log/{slug}/ missing but status='{status}' in {rel}"
-                    report.add(f"log dir exists for worked client: {slug}", None, msg, file=rel, rule="aurora/structure.yml")
-                    _gh_annotation("warning", f"giskard WARNING: {msg}", rel)
-                else:
-                    report.add(f"log dir exists for worked client: {slug}", True, file=rel)
+                if not (repo / "log" / slug).is_dir():
+                    missing_logs[slug].append(rel)
 
-    if not found_any_inbox:
+    if total_files == 0:
         report.add("referential integrity", None, "no inbox files found — skipped")
+        return
+
+    # --- emit aggregated results ---
+
+    # client dirs
+    if missing_client_dirs:
+        for slug, files in sorted(missing_client_dirs.items()):
+            detail = f"clients/{slug}/ missing ← " + ", ".join(files)
+            report.add(f"client dir missing: {slug}", False, detail, rule="aurora/structure.yml")
+            _gh_annotation("error", f"giskard ERROR: client dir 'clients/{slug}/' missing", files[0])
+    else:
+        report.add(f"all client dirs aligned ({total_files} files)", True)
+
+    # contacts
+    if missing_contacts:
+        for contact, files in sorted(missing_contacts.items()):
+            detail = f"contacts/{contact}.yml missing ← " + ", ".join(files)
+            report.add(f"contact missing: {contact}", None, detail, rule="aurora/structure.yml")
+            _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing", files[0])
+    else:
+        report.add(f"all contacts resolved ({total_files} files)", True)
+
+    # assigned_to
+    if missing_assigned:
+        for contact, files in sorted(missing_assigned.items()):
+            detail = f"contacts/{contact}.yml missing (assigned_to) ← " + ", ".join(files)
+            report.add(f"assigned_to missing: {contact}", None, detail, rule="aurora/structure.yml")
+            _gh_annotation("warning", f"giskard WARNING: contacts/{contact}.yml missing (assigned_to)", files[0])
+    else:
+        report.add(f"all assigned_to resolved ({total_files} files)", True)
+
+    # log dirs
+    if missing_logs:
+        for slug, files in sorted(missing_logs.items()):
+            detail = f"log/{slug}/ missing ← " + ", ".join(files)
+            report.add(f"log dir missing for worked client: {slug}", None, detail, rule="aurora/structure.yml")
+            _gh_annotation("warning", f"giskard WARNING: log/{slug}/ missing", files[0])
+    else:
+        report.add(f"all log dirs present for worked clients ({total_files} files)", True)
 
 
 def run(repo: Path, report: Report) -> None:
