@@ -26,6 +26,7 @@ Section order (top-down, most general to most specific):
     Skipped if no generated files exist.
 
   dojo — refs
+    0. kiroku/nikki/ contains only .yml files (no .md or other extensions)
     1. kiroku/nikki/ filenames match YYYY-MM-DD_{subject}_{type}.yml
     2. last_session.subject → kata/{subject}/ must exist
     3. nikki subject → gakusei.subjects
@@ -48,6 +49,8 @@ REQUIRED_TEMPLATES = [
     "kiroku_makimono.yml",
     "shinsa.yml",
 ]
+
+_IGNORED_NAMES = {".keep", ".gitkeep"}
 
 STRUCTURE_CHECKS = [
     {
@@ -251,6 +254,21 @@ def _check_refs(repo: Path, report: Report) -> None:
     nikki_dir = repo / "kiroku" / "nikki"
     makimono_dir = repo / "kiroku" / "makimono"
 
+    # --- 0. kiroku/nikki/ must contain only .yml files ---
+    if nikki_dir.is_dir():
+        wrong_ext = sorted(
+            str(f.relative_to(repo))
+            for f in nikki_dir.iterdir()
+            if f.is_file() and f.name not in _IGNORED_NAMES and f.suffix != ".yml"
+        )
+        if wrong_ext:
+            detail = "non-.yml files found ← " + ", ".join(wrong_ext)
+            report.add("kiroku/nikki/ contains non-.yml files", False, detail, rule="dojo/refs.yml")
+            for path in wrong_ext:
+                _gh_annotation("error", f"giskard ERROR: kiroku/nikki file must be .yml, got {path}", path)
+        else:
+            report.add("kiroku/nikki/ contains only .yml files", True)
+
     # --- 1. nikki filename pattern ---
     if nikki_dir.is_dir():
         bad_names = [
@@ -291,7 +309,7 @@ def _check_refs(repo: Path, report: Report) -> None:
         elif nikki_subs:
             report.add(f"all nikki subjects declared in .gakusei.yml ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no nikki files found — skipping nikki→gakusei check", None)
+            report.add("no valid nikki files found — skipping nikki→gakusei check", None)
     else:
         report.add("skipping nikki→gakusei check (no nikki dir or no subjects)", None)
 
@@ -325,7 +343,7 @@ def _check_refs(repo: Path, report: Report) -> None:
         elif nikki_subs:
             report.add(f"all nikki subjects have kata/ directory ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no nikki files found — skipping nikki→kata check", None)
+            report.add("no valid nikki files found — skipping nikki→kata check", None)
     else:
         report.add("kiroku/nikki/ not found — skipping nikki→kata check", None)
 
@@ -344,7 +362,7 @@ def _check_refs(repo: Path, report: Report) -> None:
         elif nikki_subs:
             report.add(f"all nikki subjects have a makimono file ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no nikki files found — skipping nikki→makimono check", None)
+            report.add("no valid nikki files found — skipping nikki→makimono check", None)
     else:
         report.add("skipping nikki→makimono check (nikki or makimono dir missing)", None)
 
