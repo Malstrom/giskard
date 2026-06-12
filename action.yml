@@ -8,9 +8,13 @@ inputs:
     required: false
     default: "."
   framework:
-    description: "Optional framework-specific checks (e.g. dojo, aurora, tensho)"
+    description: "Optional framework-specific checks (e.g. dojo, aurora)"
     required: false
     default: ""
+  mode:
+    description: "Validation mode: 'instance' (default) or 'zeroth'"
+    required: false
+    default: "instance"
   github-token:
     description: "GitHub token to open issues on failure and post PR comment"
     required: false
@@ -39,9 +43,10 @@ runs:
       env:
         GISKARD_REPO: ${{ inputs.repo }}
         GISKARD_FRAMEWORK: ${{ inputs.framework }}
+        GISKARD_MODE: ${{ inputs.mode }}
         GISKARD_TOKEN: ${{ inputs.github-token }}
       run: |
-        ARGS="--repo $GISKARD_REPO"
+        ARGS="--repo $GISKARD_REPO --mode $GISKARD_MODE"
         if [ -n "$GISKARD_FRAMEWORK" ]; then
           ARGS="$ARGS --framework $GISKARD_FRAMEWORK"
         fi
