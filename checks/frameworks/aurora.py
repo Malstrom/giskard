@@ -1,29 +1,32 @@
 """
-checks/frameworks/aurora.py — aurora framework checks
+checks/frameworks/aurora.py — aurora framework checks (instance mode)
 
 ================================================================================
-AURORA FRAMEWORK SPEC
-Inferred from: aurora/.scenarios.yml + repo structure
-Last updated: 2026-06-11
+AURORA INSTANCE CHECKS
+Validates the user instance repo only.
+Spec files (.scenarios.yml, templates/) live in zeroth and are NOT checked here.
+Source: zeroth/frameworks/aurora/structure.yml
+Last updated: 2026-06-12
 ================================================================================
 
-Section order (top-down, most general to most specific):
+Section order:
 
   aurora — structure
-    .aurora.yml fields, required dirs (clients/, contacts/, playbooks/, templates/),
-    templates present, framework-specific handler (reindex_check)
+    .aurora.yml fields, required dirs (clients/, contacts/, playbooks/)
+    framework-specific handler (reindex_check)
     Note: no top-level log/ dir — logs live in clients/{slug}/log/
+    Note: templates/ is NOT required in the instance — lives in zeroth
 
   aurora — files
     Every generated file contains all root keys of its local template.
     Mapping (glob → template):
       clients/*/inbox/*.yml          → templates/inbox.yml
       contacts/*.yml                 → templates/contact.yml
-      clients/*/log/????-??-??.yml   → templates/log.yml       (session logs: YYYY-MM-DD.yml only)
+      clients/*/log/????-??-??.yml   → templates/log.yml       (session logs)
       clients/*/log/*.index.yml      → templates/log_index.yml  (monthly index)
-    Skipped if no generated files exist. No network calls.
-    Note: clients/*/playbooks/*.yml not validated here — client playbooks
-    have a different structure from general playbooks. Covered by aurora — refs.
+    Skipped if template not found locally (new arch instances have no local templates).
+    No network calls.
+    Note: clients/*/playbooks/*.yml not validated here — covered by aurora — refs.
 
   aurora — refs
     Every reference in every file resolves to something that exists.
@@ -55,19 +58,7 @@ KNOWN GAPS / FUTURE CHECKS
 import yaml
 from pathlib import Path
 from collections import defaultdict
-from core import run_check, Report, ERROR, _gh_annotation
-
-REQUIRED_TEMPLATES = [
-    "inbox.yml",
-    "log.yml",
-    "log_index.yml",
-    "contact.yml",
-    "client_context.yml",
-    "playbook.yml",
-    "output_csv.md",
-    "output_email.md",
-    "output_report.md",
-]
+from core import run_check, Report, _gh_annotation
 
 STRUCTURE_CHECKS = [
     {
@@ -96,13 +87,6 @@ STRUCTURE_CHECKS = [
         "proxy": "file_exists",
         "target": "playbooks",
         "file": "playbooks/",
-        "rule": "aurora/structure.yml",
-    },
-    {
-        "label": "templates/ missing required aurora files",
-        "proxy": "dir_has_templates",
-        "target": "templates",
-        "required_files": REQUIRED_TEMPLATES,
         "rule": "aurora/structure.yml",
     },
     {
@@ -149,6 +133,9 @@ STRUCTURE_CHECKS = [
     },
 ]
 
+# FILE_KEY_CHECKS: validates generated files against local templates.
+# If the instance has no local templates/ (new arch), these are skipped
+# gracefully by proxy_generated_files_match_template (template not found → None).
 FILE_KEY_CHECKS = [
     {
         "label": "inbox files: keys missing vs templates/inbox.yml",
@@ -223,7 +210,6 @@ def _check_refs(repo: Path, report: Report) -> None:
         if not client_dir.is_dir():
             continue
 
-        # inbox refs
         inbox_dir = client_dir / "inbox"
         if inbox_dir.is_dir():
             for inbox_file in sorted(f for f in inbox_dir.iterdir() if f.suffix == ".yml"):
@@ -249,7 +235,6 @@ def _check_refs(repo: Path, report: Report) -> None:
                     if not (client_dir / "log").is_dir():
                         missing_logs[slug].append(rel)
 
-        # playbook refs
         pb_dir = client_dir / "playbooks"
         if pb_dir.is_dir():
             for pb_file in sorted(f for f in pb_dir.iterdir() if f.suffix == ".yml"):
