@@ -430,6 +430,32 @@ PROXY_REGISTRY = {
 # Report
 # ---------------------------------------------------------------------------
 
+def _section_framework(section_name: str) -> str:
+    """Extract framework name from a section label for grouping.
+
+    Naming conventions:
+      "zeroth — agent"            → "_zeroth_agent"  (special: always first)
+      "dojo@zeroth — structure"   → "dojo"
+      "aurora@zeroth — scenarios" → "aurora"
+      "dojo — structure"          → "dojo"
+      anything else               → the raw section name
+    """
+    if section_name == "zeroth — agent":
+        return "_zeroth_agent"
+    if "@" in section_name:
+        return section_name.split("@")[0].strip()
+    if " — " in section_name:
+        return section_name.split(" — ")[0].strip()
+    return section_name
+
+
+def _framework_display(fw_key: str) -> str:
+    """Human-readable header for a framework group."""
+    if fw_key == "_zeroth_agent":
+        return "zeroth — agent"
+    return fw_key
+
+
 class Report:
     def __init__(self, repo: Path):
         self.repo = repo
@@ -451,7 +477,7 @@ class Report:
             self.errored += 1
             icon = "\U0001f4a5"
             kind = "errored"
-            msg = f"giskard error: {label}"
+            msg = f"Giskard error: {label}"
             if note:
                 msg += f" — {note}"
             _gh_annotation("error", msg, file)
@@ -460,7 +486,7 @@ class Report:
             icon = "\u274c"
             kind = "failed"
             self.failures.append({"label": label, "file": file, "rule": rule})
-            msg = f"giskard FAILED: {label}"
+            msg = f"Giskard FAILED: {label}"
             if note:
                 msg += f" — {note}"
             if rule:
@@ -492,46 +518,85 @@ class Report:
         else:
             status = "\u2705 passed"
         header = [
-            "# giskard report",
+            "# \U0001f916 Giskard report",
             "",
             f"- **repo**: {self.repo.name}",
             f"- **date**: {self.ts}",
             f"- **result**: {status} — {self.passed} passed / {self.failed} failed / {self.skipped} skipped / {self.errored} errored",
             "",
-            "## checks",
-            "",
         ]
 
-        by_section = {}
+        # Group entries by section, preserving insertion order
+        by_section: dict[str, list] = {}
         for e in self.entries:
             by_section.setdefault(e["section"], []).append(e)
 
+        # Group sections by framework, zeroth — agent always first
+        by_framework: dict[str, list[str]] = {}
+        for section_name in by_section:
+            fw = _section_framework(section_name)
+            by_framework.setdefault(fw, []).append(section_name)
+
+        # Sort: _zeroth_agent first, then alphabetical
+        fw_order = sorted(
+            by_framework.keys(),
+            key=lambda k: (0 if k == "_zeroth_agent" else 1, k),
+        )
+
         body = []
-        for section, items in by_section.items():
-            n_passed = sum(1 for i in items if i["kind"] == "passed")
-            n_failed = sum(1 for i in items if i["kind"] == "failed")
-            n_skipped = sum(1 for i in items if i["kind"] == "skipped")
-            n_errored = sum(1 for i in items if i["kind"] == "errored")
+        for fw_key in fw_order:
+            fw_sections = by_framework[fw_key]
 
-            if n_failed == 0 and n_errored == 0 and n_skipped == 0:
-                body.append(f"\u2502 {section} \u2705 {n_passed}/{len(items)}")
-                continue
+            # Collect all items in this framework group
+            all_items = []
+            for sec in fw_sections:
+                all_items.extend(by_section[sec])
 
-            section_status = "\u274c" if (n_failed or n_errored) else "\u26a0\ufe0f"
-            body.append(
-                f"\u2502 {section} {section_status} "
-                f"{n_passed} passed / {n_failed} failed / {n_skipped} skipped / {n_errored} errored"
-            )
-            for item in items:
-                if item["kind"] != "passed":
-                    body.append(item["line"])
-            if n_passed > 0:
-                body.append(f"  \u2139\ufe0f {n_passed} passed checks hidden")
+            fw_passed = sum(1 for i in all_items if i["kind"] == "passed")
+            fw_failed = sum(1 for i in all_items if i["kind"] == "failed")
+            fw_skipped = sum(1 for i in all_items if i["kind"] == "skipped")
+            fw_errored = sum(1 for i in all_items if i["kind"] == "errored")
+
+            if fw_failed == 0 and fw_errored == 0 and fw_skipped == 0:
+                fw_status = f"\u2705 {fw_passed}/{len(all_items)}"
+            elif fw_failed or fw_errored:
+                fw_status = f"\u274c {fw_passed} passed / {fw_failed} failed / {fw_skipped} skipped / {fw_errored} errored"
+            else:
+                fw_status = f"\u26a0\ufe0f {fw_passed} passed / {fw_failed} failed / {fw_skipped} skipped / {fw_errored} errored"
+
+            body.append(f"### {_framework_display(fw_key)} {fw_status}")
+            body.append("")
+
+            # Within the framework, render each sub-section
+            for sec in fw_sections:
+                items = by_section[sec]
+                n_passed = sum(1 for i in items if i["kind"] == "passed")
+                n_failed = sum(1 for i in items if i["kind"] == "failed")
+                n_skipped = sum(1 for i in items if i["kind"] == "skipped")
+                n_errored = sum(1 for i in items if i["kind"] == "errored")
+
+                # Only show sub-section label when the framework has multiple sections
+                if len(fw_sections) > 1:
+                    # Extract the check type from section name (e.g. "structure", "scenarios")
+                    check_type = sec.split(" — ")[-1] if " — " in sec else sec
+                    if n_failed == 0 and n_errored == 0 and n_skipped == 0:
+                        body.append(f"**{check_type}** \u2705 {n_passed}/{len(items)}")
+                    else:
+                        sec_status = "\u274c" if (n_failed or n_errored) else "\u26a0\ufe0f"
+                        body.append(f"**{check_type}** {sec_status}")
+                    body.append("")
+
+                for item in items:
+                    if item["kind"] != "passed":
+                        body.append(item["line"])
+                if n_passed > 0 and (n_failed > 0 or n_skipped > 0 or n_errored > 0):
+                    body.append(f"  \u2139\ufe0f {n_passed} passed checks hidden")
+
             body.append("")
 
         with open(out, "w") as f:
             f.write("\n".join(header + body).rstrip() + "\n")
-        print(f"\n[giskard] report written to {out}")
+        print(f"\n[Giskard] report written to {out}")
         return out
 
     @property
