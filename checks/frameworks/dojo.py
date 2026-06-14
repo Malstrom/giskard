@@ -30,7 +30,7 @@ Section order:
     3. nikki subject → gakusei.subjects
     4. makimono subject → gakusei.subjects
     5. nikki subject → kata/{subject}/ exists
-    6. nikki → makimono consistency
+    6. nikki → makimono consistency (WARNING — makimono only created at level_up)
 
 ================================================================================
 """
@@ -112,9 +112,6 @@ GAKUSEI_KEY_CHECKS = [
     },
 ]
 
-# FILE_KEY_CHECKS: validates generated files against local templates.
-# If the instance has no local templates/ (new arch), these are skipped
-# gracefully by proxy_generated_files_match_template (template not found -> None).
 FILE_KEY_CHECKS = [
     {
         "label": "kiroku/nikki files: keys missing vs templates/kiroku_nikki.yml",
@@ -258,18 +255,18 @@ def _check_refs(repo: Path, report: Report) -> None:
     else:
         report.add("kiroku/nikki/ not found — skipping nikki→kata check", None)
 
-    # --- 6. nikki → makimono consistency ---
+    # --- 6. nikki → makimono consistency (WARNING only) ---
+    # Makimono files are created only at level_up, not at study_open.
+    # A dojo with nikki but no makimono is a valid pre-level-up state.
     if nikki_dir.is_dir() and makimono_dir.is_dir():
         nikki_subs = _nikki_subjects(nikki_dir)
         makimono_subjects = {f.stem for f in makimono_dir.iterdir() if f.suffix == ".yml"}
         missing_maki = sorted(nikki_subs - makimono_subjects)
         if missing_maki:
-            detail = "nikki subjects with no makimono file <- " + ", ".join(
+            detail = "nikki subjects with no makimono yet <- " + ", ".join(
                 f"kiroku/makimono/{s}.yml" for s in missing_maki
             )
-            report.add("nikki subjects missing corresponding makimono file", False, detail, rule="dojo/refs.yml")
-            _gh_annotation("error", "giskard ERROR: makimono missing for nikki subject",
-                           f"kiroku/makimono/{missing_maki[0]}.yml")
+            report.add("nikki subjects missing corresponding makimono file", None, detail, rule="dojo/refs.yml")
         elif nikki_subs:
             report.add(f"all nikki subjects have a makimono file ({len(nikki_subs)} subjects)", True)
         else:
@@ -283,8 +280,6 @@ def run(repo: Path, report: Report) -> None:
     for check in STRUCTURE_CHECKS_NO_GAKUSEI:
         run_check(repo, check, report)
 
-    # .gakusei.yml key checks: WARNING if file absent (onboarding not yet run),
-    # FAIL only if file exists but keys are missing.
     gakusei_path = repo / ".gakusei.yml"
     if not gakusei_path.exists():
         report.add(".gakusei.yml absent — onboarding not yet run", None,
