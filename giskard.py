@@ -5,8 +5,8 @@ giskard — universal zeroth rules validator.
 Two modes:
 
   instance (default)
-    Validates a student/user instance repo against zeroth universal rules
-    and optional framework-specific instance checks.
+    Validates a student/user instance repo against the zeroth .agent.yml
+    rules and optional framework-specific instance checks.
 
     python giskard.py --repo /path/to/instance --framework dojo
 
@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 from core import Report, ERROR, _gh_annotation
-from checks import universal
+from checks import agent
 
 
 def open_failure_issue(report: Report, repo_name: str, token: str):
@@ -120,7 +120,6 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
 
     if mode == "zeroth":
         # zeroth mode: validate spec files inside a zeroth clone.
-        # Universal rules are skipped — zeroth is not an instance.
         if framework:
             frameworks = [framework]
         else:
@@ -143,8 +142,10 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
                 fw.run(repo, report)
 
     else:
-        # instance mode (default): universal rules + optional framework checks.
-        universal.run(repo, report)
+        # instance mode: .agent.yml check + optional framework-specific checks.
+        # Only agent rules apply universally to every instance.
+        # Framework checks (files, structure, refs) live in checks/frameworks/{name}.py.
+        agent.run(repo, report)
 
         if framework:
             fw = load_module("checks.frameworks", framework)
