@@ -47,6 +47,9 @@ runs:
         GISKARD_TOKEN: ${{ inputs.github-token }}
       run: |
         REPO_ABS=$(realpath "$GISKARD_REPO")
+        # Export path BEFORE running giskard so downstream steps always see it
+        # even when giskard exits with code 1 (check failures).
+        echo "GISKARD_REPORT_PATH=$REPO_ABS/giskard-report.md" >> $GITHUB_ENV
         ARGS="--repo $REPO_ABS --mode $GISKARD_MODE"
         if [ -n "$GISKARD_FRAMEWORK" ]; then
           ARGS="$ARGS --framework $GISKARD_FRAMEWORK"
@@ -55,29 +58,21 @@ runs:
           ARGS="$ARGS --github-token $GISKARD_TOKEN"
         fi
         python _giskard/giskard.py $ARGS
-        echo "GISKARD_REPORT_PATH=$REPO_ABS/giskard-report.md" >> $GITHUB_ENV
 
     - name: Post report as PR comment
       if: always() && inputs.github-token != '' && github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        REPO: ${{ github.repository }}
       run: |
-        REPORT="${GISKARD_REPORT_PATH:-$GITHUB_WORKSPACE/giskard-report.md}"
+        REPORT="$GISKARD_REPORT_PATH"
         if [ ! -f "$REPORT" ]; then
           echo "No report file found at $REPORT, skipping comment."
           exit 0
         fi
-        BODY=$(cat "$REPORT")
-        PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
-        curl -s -X POST \
-          -H "Authorization: Bearer $GH_TOKEN" \
-          -H "Accept: application/vnd.github+json" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "https://api.github.com/repos/$REPO/issues/$PR_NUMBER/comments" \
-          -d "$PAYLOAD"
+        gh pr comment ${{ github.event.pull_request.number }} \
+          --repo ${{ github.repository }} \
+          --body-file "$REPORT"
 
     - name: Upload report
       if: always()
