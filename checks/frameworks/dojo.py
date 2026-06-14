@@ -14,7 +14,7 @@ Section order:
   dojo — structure
     Required root files: .agent.yml, .gakusei.yml
     Required dirs: kata/, kiroku/makimono/, kiroku/nikki/
-    .gakusei.yml required keys: name, language, subjects, last_session
+    .gakusei.yml required keys: student_name, language, subjects, last_session
     NOTE: if .gakusei.yml is absent, key checks emit WARNING (onboarding
     not yet run) instead of FAIL.
 
@@ -83,10 +83,10 @@ STRUCTURE_CHECKS_NO_GAKUSEI = [
 
 GAKUSEI_KEY_CHECKS = [
     {
-        "label": ".gakusei.yml missing 'name' field",
+        "label": ".gakusei.yml missing 'student_name' field",
         "proxy": "yaml_key_exists",
         "file": ".gakusei.yml",
-        "key": "name",
+        "key": "student_name",
         "rule": "dojo/structure.yml",
     },
     {
