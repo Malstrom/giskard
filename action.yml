@@ -8,7 +8,7 @@ inputs:
     required: false
     default: "."
   framework:
-    description: "Optional framework-specific checks (e.g. dojo, aurora)"
+    description: "Framework-specific checks (dojo, aurora, ...). In zeroth mode, omit to autodiscover all frameworks in repo/frameworks/."
     required: false
     default: ""
   mode:
@@ -83,6 +83,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: giskard-report-${{ inputs.framework || 'universal' }}-${{ inputs.mode }}
+        name: giskard-report-${{ inputs.framework || 'all' }}-${{ inputs.mode }}
         path: ${{ env.GISKARD_REPORT_PATH }}
         if-no-files-found: ignore
