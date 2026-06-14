@@ -46,7 +46,8 @@ runs:
         GISKARD_MODE: ${{ inputs.mode }}
         GISKARD_TOKEN: ${{ inputs.github-token }}
       run: |
-        ARGS="--repo $GISKARD_REPO --mode $GISKARD_MODE"
+        REPO_ABS=$(realpath "$GISKARD_REPO")
+        ARGS="--repo $REPO_ABS --mode $GISKARD_MODE"
         if [ -n "$GISKARD_FRAMEWORK" ]; then
           ARGS="$ARGS --framework $GISKARD_FRAMEWORK"
         fi
@@ -54,6 +55,7 @@ runs:
           ARGS="$ARGS --github-token $GISKARD_TOKEN"
         fi
         python _giskard/giskard.py $ARGS
+        echo "GISKARD_REPORT_PATH=$REPO_ABS/giskard-report.md" >> $GITHUB_ENV
 
     - name: Post report as PR comment
       if: always() && inputs.github-token != '' && github.event_name == 'pull_request'
@@ -63,11 +65,12 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
       run: |
-        if [ ! -f giskard-report.md ]; then
-          echo "No report file found, skipping comment."
+        REPORT="${GISKARD_REPORT_PATH:-$GITHUB_WORKSPACE/giskard-report.md}"
+        if [ ! -f "$REPORT" ]; then
+          echo "No report file found at $REPORT, skipping comment."
           exit 0
         fi
-        BODY=$(cat giskard-report.md)
+        BODY=$(cat "$REPORT")
         PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
         curl -s -X POST \
           -H "Authorization: Bearer $GH_TOKEN" \
@@ -80,6 +83,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: giskard-report
-        path: giskard-report.md
+        name: giskard-report-${{ inputs.framework || 'universal' }}-${{ inputs.mode }}
+        path: ${{ env.GISKARD_REPORT_PATH }}
         if-no-files-found: ignore
