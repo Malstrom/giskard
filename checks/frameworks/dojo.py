@@ -6,7 +6,7 @@ DOJO INSTANCE CHECKS
 Validates the student instance repo only.
 Spec files (.scenarios.yml, templates/) live in zeroth and are NOT checked here.
 Source: zeroth/frameworks/dojo/structure.yml
-Last updated: 2026-06-12
+Last updated: 2026-06-14
 ================================================================================
 
 Section order:
@@ -15,6 +15,8 @@ Section order:
     Required root files: .agent.yml, .gakusei.yml
     Required dirs: kata/, kiroku/makimono/, kiroku/nikki/
     .gakusei.yml required keys: name, language, subjects, last_session
+    NOTE: if .gakusei.yml is absent, key checks emit WARNING (onboarding
+    not yet run) instead of FAIL.
 
   dojo — files
     kiroku/nikki/????-??-??_*.yml → templates/kiroku_nikki.yml (if present locally)
@@ -41,7 +43,7 @@ from core import run_check, Report, _gh_annotation
 
 _IGNORED_NAMES = {".keep", ".gitkeep"}
 
-STRUCTURE_CHECKS = [
+STRUCTURE_CHECKS_NO_GAKUSEI = [
     {
         "label": ".agent.yml not found",
         "proxy": "file_exists",
@@ -77,6 +79,9 @@ STRUCTURE_CHECKS = [
         "file": "kiroku/nikki/",
         "rule": "dojo/structure.yml",
     },
+]
+
+GAKUSEI_KEY_CHECKS = [
     {
         "label": ".gakusei.yml missing 'name' field",
         "proxy": "yaml_key_exists",
@@ -109,7 +114,7 @@ STRUCTURE_CHECKS = [
 
 # FILE_KEY_CHECKS: validates generated files against local templates.
 # If the instance has no local templates/ (new arch), these are skipped
-# gracefully by proxy_generated_files_match_template (template not found → None).
+# gracefully by proxy_generated_files_match_template (template not found -> None).
 FILE_KEY_CHECKS = [
     {
         "label": "kiroku/nikki files: keys missing vs templates/kiroku_nikki.yml",
@@ -168,7 +173,7 @@ def _check_refs(repo: Path, report: Report) -> None:
             if f.is_file() and f.name not in _IGNORED_NAMES and f.suffix != ".yml"
         )
         if wrong_ext:
-            detail = "non-.yml files found \u2190 " + ", ".join(wrong_ext)
+            detail = "non-.yml files found <- " + ", ".join(wrong_ext)
             report.add("kiroku/nikki/ contains non-.yml files", False, detail, rule="dojo/refs.yml")
             for path in wrong_ext:
                 _gh_annotation("error", f"giskard ERROR: kiroku/nikki file must be .yml, got {path}", path)
@@ -183,7 +188,7 @@ def _check_refs(repo: Path, report: Report) -> None:
             if f.suffix == ".yml" and not NIKKI_PATTERN.match(f.name)
         ]
         if bad_names:
-            detail = "invalid filename pattern \u2190 " + ", ".join(sorted(bad_names))
+            detail = "invalid filename pattern <- " + ", ".join(sorted(bad_names))
             report.add("kiroku/nikki filenames: pattern YYYY-MM-DD_{subject}_{type}.yml not respected", False, detail, rule="dojo/refs.yml")
             _gh_annotation("error", "giskard ERROR: kiroku/nikki invalid filename", bad_names[0])
         else:
@@ -200,7 +205,7 @@ def _check_refs(repo: Path, report: Report) -> None:
                        f"kata/{ls_subject}/ not found", rule="dojo/refs.yml")
             _gh_annotation("error", f"giskard ERROR: kata/{ls_subject}/ missing", ".gakusei.yml")
         else:
-            report.add(f"last_session.subject '{ls_subject}' \u2192 kata/{ls_subject}/ exists", True)
+            report.add(f"last_session.subject '{ls_subject}' → kata/{ls_subject}/ exists", True)
     else:
         report.add("last_session.subject empty — skipping kata ref check", None)
 
@@ -209,30 +214,30 @@ def _check_refs(repo: Path, report: Report) -> None:
         nikki_subs = _nikki_subjects(nikki_dir)
         unknown = sorted(nikki_subs - gakusei_subjects)
         if unknown:
-            detail = "subjects in nikki not in .gakusei.yml \u2190 " + ", ".join(unknown)
+            detail = "subjects in nikki not in .gakusei.yml <- " + ", ".join(unknown)
             report.add("nikki subjects not declared in .gakusei.yml", False, detail, rule="dojo/refs.yml")
             _gh_annotation("error", "giskard ERROR: nikki subject not in gakusei", str(nikki_dir))
         elif nikki_subs:
             report.add(f"all nikki subjects declared in .gakusei.yml ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no valid nikki files found — skipping nikki\u2192gakusei check", None)
+            report.add("no valid nikki files found — skipping nikki→gakusei check", None)
     else:
-        report.add("skipping nikki\u2192gakusei check (no nikki dir or no subjects)", None)
+        report.add("skipping nikki→gakusei check (no nikki dir or no subjects)", None)
 
     # --- 4. makimono subject → gakusei.subjects ---
     if makimono_dir.is_dir() and gakusei_subjects:
         makimono_files = [f for f in makimono_dir.iterdir() if f.suffix == ".yml"]
         unknown_maki = sorted(f.stem for f in makimono_files if f.stem not in gakusei_subjects)
         if unknown_maki:
-            detail = "makimono files with no matching subject in .gakusei.yml \u2190 " + ", ".join(unknown_maki)
+            detail = "makimono files with no matching subject in .gakusei.yml <- " + ", ".join(unknown_maki)
             report.add("makimono subjects not declared in .gakusei.yml", False, detail, rule="dojo/refs.yml")
             _gh_annotation("error", "giskard ERROR: makimono subject not in gakusei", str(makimono_dir))
         elif makimono_files:
             report.add(f"all makimono subjects declared in .gakusei.yml ({len(makimono_files)} files)", True)
         else:
-            report.add("no makimono files found — skipping makimono\u2192gakusei check", None)
+            report.add("no makimono files found — skipping makimono→gakusei check", None)
     else:
-        report.add("skipping makimono\u2192gakusei check (no makimono dir or no subjects)", None)
+        report.add("skipping makimono→gakusei check (no makimono dir or no subjects)", None)
 
     # --- 5. nikki subject → kata/{subject}/ exists ---
     if nikki_dir.is_dir():
@@ -243,15 +248,15 @@ def _check_refs(repo: Path, report: Report) -> None:
                 missing_kata[sub].append(f"kata/{sub}/")
         if missing_kata:
             for sub, paths in sorted(missing_kata.items()):
-                detail = "kata dir missing \u2190 " + ", ".join(paths)
+                detail = "kata dir missing <- " + ", ".join(paths)
                 report.add(f"nikki subject '{sub}' has no kata/{sub}/ directory", False, detail, rule="dojo/refs.yml")
                 _gh_annotation("error", f"giskard ERROR: kata/{sub}/ missing for nikki subject", str(nikki_dir))
         elif nikki_subs:
             report.add(f"all nikki subjects have kata/ directory ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no valid nikki files found — skipping nikki\u2192kata check", None)
+            report.add("no valid nikki files found — skipping nikki→kata check", None)
     else:
-        report.add("kiroku/nikki/ not found — skipping nikki\u2192kata check", None)
+        report.add("kiroku/nikki/ not found — skipping nikki→kata check", None)
 
     # --- 6. nikki → makimono consistency ---
     if nikki_dir.is_dir() and makimono_dir.is_dir():
@@ -259,7 +264,7 @@ def _check_refs(repo: Path, report: Report) -> None:
         makimono_subjects = {f.stem for f in makimono_dir.iterdir() if f.suffix == ".yml"}
         missing_maki = sorted(nikki_subs - makimono_subjects)
         if missing_maki:
-            detail = "nikki subjects with no makimono file \u2190 " + ", ".join(
+            detail = "nikki subjects with no makimono file <- " + ", ".join(
                 f"kiroku/makimono/{s}.yml" for s in missing_maki
             )
             report.add("nikki subjects missing corresponding makimono file", False, detail, rule="dojo/refs.yml")
@@ -268,15 +273,26 @@ def _check_refs(repo: Path, report: Report) -> None:
         elif nikki_subs:
             report.add(f"all nikki subjects have a makimono file ({len(nikki_subs)} subjects)", True)
         else:
-            report.add("no valid nikki files found — skipping nikki\u2192makimono check", None)
+            report.add("no valid nikki files found — skipping nikki→makimono check", None)
     else:
-        report.add("skipping nikki\u2192makimono check (nikki or makimono dir missing)", None)
+        report.add("skipping nikki→makimono check (nikki or makimono dir missing)", None)
 
 
 def run(repo: Path, report: Report) -> None:
     report.section("dojo — structure")
-    for check in STRUCTURE_CHECKS:
+    for check in STRUCTURE_CHECKS_NO_GAKUSEI:
         run_check(repo, check, report)
+
+    # .gakusei.yml key checks: WARNING if file absent (onboarding not yet run),
+    # FAIL only if file exists but keys are missing.
+    gakusei_path = repo / ".gakusei.yml"
+    if not gakusei_path.exists():
+        report.add(".gakusei.yml absent — onboarding not yet run", None,
+                   "run the dojo onboarding scenario to generate this file",
+                   rule="dojo/structure.yml", file=".gakusei.yml")
+    else:
+        for check in GAKUSEI_KEY_CHECKS:
+            run_check(repo, check, report)
 
     report.section("dojo — files")
     for check in FILE_KEY_CHECKS:
