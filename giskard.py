@@ -14,7 +14,11 @@ Two modes:
     Validates the zeroth repo itself — checks that framework spec files
     (scenarios, templates, structure) are well-formed.
 
-    python giskard.py --repo /path/to/zeroth --mode zeroth --framework dojo
+    Autodiscover all frameworks:
+      python giskard.py --repo /path/to/zeroth --mode zeroth
+
+    Single framework (dev/targeted):
+      python giskard.py --repo /path/to/zeroth --mode zeroth --framework dojo
 
 Exit codes:
   0  all checks passed
@@ -49,9 +53,9 @@ def open_failure_issue(report: Report, repo_name: str, token: str):
     for f in report.failures:
         line = f"- **{f['label']}**"
         if f["file"]:
-            line += f" \u2014 `{f['file']}`"
+            line += f" — `{f['file']}`"
         if f["rule"]:
-            line += f" \u2014 rule: [{f['rule']}](https://github.com/Malstrom/zeroth/blob/main/rules/{f['rule']})"
+            line += f" — rule: [{f['rule']}](https://github.com/Malstrom/zeroth/blob/main/rules/{f['rule']})"
         lines.append(line)
 
     body = (
@@ -96,6 +100,14 @@ def load_module(package: str, name: str):
         return None
 
 
+def discover_frameworks(repo: Path) -> list[str]:
+    """Return sorted list of framework names found in repo/frameworks/."""
+    frameworks_dir = repo / "frameworks"
+    if not frameworks_dir.is_dir():
+        return []
+    return sorted(d.name for d in frameworks_dir.iterdir() if d.is_dir())
+
+
 def run(repo_path: str, framework: str = None, mode: str = "instance", github_token: str = None):
     repo = Path(repo_path).resolve()
     if not repo.is_dir():
@@ -103,8 +115,6 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
         sys.exit(2)
 
     print(f"[giskard] validating '{repo.name}' (mode: {mode})")
-    if framework:
-        print(f"[giskard] framework: {framework}")
 
     report = Report(repo)
 
@@ -112,18 +122,26 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
         # zeroth mode: validate spec files inside a zeroth clone.
         # Universal rules are skipped — zeroth is not an instance.
         if framework:
-            fw = load_module("checks.zeroth", framework)
+            frameworks = [framework]
+        else:
+            frameworks = discover_frameworks(repo)
+            if not frameworks:
+                print("[giskard] WARNING: no frameworks found in repo/frameworks/ — nothing to check")
+            else:
+                print(f"[giskard] discovered frameworks: {', '.join(frameworks)}")
+
+        for fw_name in frameworks:
+            fw = load_module("checks.zeroth", fw_name)
             if fw is None:
                 msg = (
-                    f"zeroth checks for framework '{framework}' not yet implemented. "
-                    f"Add checks/zeroth/{framework}.py to enable."
+                    f"zeroth checks for framework '{fw_name}' not yet implemented. "
+                    f"Add checks/zeroth/{fw_name}.py to enable."
                 )
                 print(f"\n[giskard] WARNING: {msg}")
                 _gh_annotation("warning", f"giskard: {msg}")
             else:
                 fw.run(repo, report)
-        else:
-            print("[giskard] WARNING: --mode zeroth requires --framework")
+
     else:
         # instance mode (default): universal rules + optional framework checks.
         universal.run(repo, report)
@@ -162,7 +180,7 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="giskard — zeroth rules validator")
     parser.add_argument("--repo", required=True, help="Path to repo to validate")
-    parser.add_argument("--framework", default=None, help="Framework-specific checks (dojo, aurora, ...)")
+    parser.add_argument("--framework", default=None, help="Framework-specific checks (dojo, aurora, ...). In zeroth mode, omit to autodiscover all frameworks.")
     parser.add_argument("--mode", default="instance", choices=["instance", "zeroth"],
                         help="Validation mode: 'instance' (default) or 'zeroth'")
     parser.add_argument("--github-token", default=None, dest="github_token",
