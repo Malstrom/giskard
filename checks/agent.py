@@ -6,10 +6,76 @@ See: https://github.com/Malstrom/zeroth/issues/100
 These checks are framework-agnostic.
 """
 
+import logging
 from pathlib import Path
+
+import urllib.request
+import urllib.error
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore
+
 from core import run_check, Report
 
+log = logging.getLogger(__name__)
+
 VALID_ACCESS = ["read-only", "read-write", "append-only", "write-once"]
+
+# ---------------------------------------------------------------------------
+# Fallback — used when zeroth is unreachable (network error, rate limit, etc.)
+# ---------------------------------------------------------------------------
+_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK = ["file", "spec", "read_before_responding", "on_no_match"]
+
+_ZEROTH_RULES_AGENT_URL = (
+    "https://raw.githubusercontent.com/Malstrom/zeroth/main/rules/agent.yml"
+)
+
+
+def _fetch_scenarios_required_subkeys() -> list[str]:
+    """Fetch rules/agent.yml from zeroth and derive scenarios.required_fields.
+
+    Returns the list of required subkeys for the `scenarios` block.
+    Falls back to ``_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK`` on any error.
+    """
+    if yaml is None:  # pragma: no cover
+        log.warning(
+            "PyYAML not available — using fallback scenarios subkeys: %s",
+            _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK,
+        )
+        return _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK
+
+    try:
+        with urllib.request.urlopen(_ZEROTH_RULES_AGENT_URL, timeout=5) as resp:
+            raw = resp.read().decode("utf-8")
+    except (urllib.error.URLError, OSError) as exc:
+        log.warning(
+            "Could not fetch zeroth rules/agent.yml (%s) — using fallback subkeys: %s",
+            exc,
+            _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK,
+        )
+        return _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK
+
+    try:
+        rules = yaml.safe_load(raw)
+        subkeys = rules["scenarios"]["required_fields"]
+        if not isinstance(subkeys, list) or not subkeys:
+            raise ValueError(f"unexpected required_fields value: {subkeys!r}")
+        log.debug("scenarios.required_subkeys inferred from zeroth: %s", subkeys)
+        return subkeys
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "Failed to parse zeroth rules/agent.yml (%s) — using fallback subkeys: %s",
+            exc,
+            _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK,
+        )
+        return _SCENARIOS_REQUIRED_SUBKEYS_FALLBACK
+
+
+# Resolved once at module load — stable for the lifetime of the process.
+_SCENARIOS_REQUIRED_SUBKEYS: list[str] = _fetch_scenarios_required_subkeys()
+
 
 CHECKS = [
     # ---------------------------------------------------------------------------
@@ -151,15 +217,15 @@ CHECKS = [
 
     # ---------------------------------------------------------------------------
     # scenarios subkeys
-    # 'spec' holds the cross-repo reference to the scenarios file.
-    # 'file' was a misnomer — renamed to 'spec' to match .agent.yml reality.
+    # required_subkeys are inferred at runtime from zeroth/rules/agent.yml
+    # (scenarios.required_fields). Fallback to hardcoded list on fetch failure.
     # ---------------------------------------------------------------------------
     {
         "label": "scenarios has required keys",
         "proxy": "yaml_subkeys_exist",
         "file": ".agent.yml",
         "key": "scenarios",
-        "required_subkeys": ["spec", "read_before_responding", "on_no_match"],
+        "required_subkeys": _SCENARIOS_REQUIRED_SUBKEYS,
         "rule": "agent.yml",
     },
     {
