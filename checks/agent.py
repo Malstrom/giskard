@@ -151,13 +151,15 @@ CHECKS = [
 
     # ---------------------------------------------------------------------------
     # scenarios subkeys
+    # 'spec' holds the cross-repo reference to the scenarios file.
+    # 'file' was a misnomer — renamed to 'spec' to match .agent.yml reality.
     # ---------------------------------------------------------------------------
     {
         "label": "scenarios has required keys",
         "proxy": "yaml_subkeys_exist",
         "file": ".agent.yml",
         "key": "scenarios",
-        "required_subkeys": ["file", "read_before_responding", "on_no_match"],
+        "required_subkeys": ["spec", "read_before_responding", "on_no_match"],
         "rule": "agent.yml",
     },
     {
