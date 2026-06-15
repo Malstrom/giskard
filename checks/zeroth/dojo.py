@@ -17,7 +17,7 @@ from pathlib import Path
 from core import run_check, Report
 
 REQUIRED_TEMPLATES = [
-    "kata.yml",
+    "kata.md",
     "kiroku_nikki.yml",
     "kiroku_makimono.yml",
     "shinsa.yml",
