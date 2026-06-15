@@ -1,297 +1,220 @@
 """
 checks/frameworks/dojo.py — dojo framework checks (instance mode)
 
-================================================================================
-DOJO INSTANCE CHECKS
-Validates the student instance repo only.
-Spec files (.scenarios.yml, templates/) live in zeroth and are NOT checked here.
-Source: zeroth/frameworks/dojo/structure.yml
-Last updated: 2026-06-14
-================================================================================
+All validation rules are inferred at runtime from:
+  zeroth/frameworks/dojo/structure.yml
+
+Zero dojo-specific values are hardcoded here. To change what giskard
+checks, update zeroth — not this file.
+
+This module only contains:
+  - run()           — orchestration shell
+  - _check_filename_patterns()  — nikki/makimono filename validation
+    (kept as code because it needs per-file gh annotations; not expressible
+     as a single cross_ref entry)
 
 Section order:
-
-  dojo — structure
-    Required root files: .agent.yml, .gakusei.yml
-    Required dirs: kata/, kiroku/makimono/, kiroku/nikki/
-    .gakusei.yml required keys: student_name, language, subjects, last_session
-    NOTE: if .gakusei.yml is absent, key checks emit WARNING (onboarding
-    not yet run) instead of FAIL.
-
-  dojo — files
-    kiroku/nikki/????-??-??_*.yml → templates/kiroku_nikki.yml (if present locally)
-    kiroku/makimono/*.yml          → templates/kiroku_makimono.yml (if present locally)
-    Skipped if template not found locally.
-
-  dojo — refs
-    0. kiroku/nikki/ contains only .yml files
-    1. kiroku/nikki/ filenames match YYYY-MM-DD_{subject}_{type}.yml
-    2. last_session.subject → kata/{subject}/ must exist
-    3. nikki subject → gakusei.subjects
-    4. makimono subject → gakusei.subjects
-    5. nikki subject → kata/{subject}/ exists
-    6. nikki → makimono consistency (WARNING — makimono only created at level_up)
-
-================================================================================
+  dojo — structure   (required files + dirs, from structure.yml)
+  dojo — files       (key presence per template, from structure.yml)
+  dojo — refs        (cross-references, from structure.yml cross_refs)
 """
 
 import re
-import yaml
-from collections import defaultdict
 from pathlib import Path
-from core import run_check, Report, _gh_annotation
+
+from core import run_check, Report, _gh_annotation, fetch_zeroth_structure
 
 _IGNORED_NAMES = {".keep", ".gitkeep"}
 
-STRUCTURE_CHECKS_NO_GAKUSEI = [
-    {
-        "label": ".agent.yml not found",
-        "proxy": "file_exists",
-        "target": ".agent.yml",
-        "file": ".agent.yml",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": ".gakusei.yml not found",
-        "proxy": "file_exists",
-        "target": ".gakusei.yml",
-        "file": ".gakusei.yml",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": "kata/ directory not found",
-        "proxy": "file_exists",
-        "target": "kata",
-        "file": "kata/",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": "kiroku/makimono/ directory not found",
-        "proxy": "file_exists",
-        "target": "kiroku/makimono",
-        "file": "kiroku/makimono/",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": "kiroku/nikki/ directory not found",
-        "proxy": "file_exists",
-        "target": "kiroku/nikki",
-        "file": "kiroku/nikki/",
-        "rule": "dojo/structure.yml",
-    },
-]
 
-GAKUSEI_KEY_CHECKS = [
-    {
-        "label": ".gakusei.yml missing 'student_name' field",
-        "proxy": "yaml_key_exists",
-        "file": ".gakusei.yml",
-        "key": "student_name",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": ".gakusei.yml missing 'language' field",
-        "proxy": "yaml_key_exists",
-        "file": ".gakusei.yml",
-        "key": "language",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": ".gakusei.yml missing 'subjects' field",
-        "proxy": "yaml_key_exists",
-        "file": ".gakusei.yml",
-        "key": "subjects",
-        "rule": "dojo/structure.yml",
-    },
-    {
-        "label": ".gakusei.yml missing 'last_session' field",
-        "proxy": "yaml_key_exists",
-        "file": ".gakusei.yml",
-        "key": "last_session",
-        "rule": "dojo/structure.yml",
-    },
-]
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-FILE_KEY_CHECKS = [
-    {
-        "label": "kiroku/nikki files: keys missing vs templates/kiroku_nikki.yml",
-        "proxy": "generated_files_match_template",
-        "glob": "kiroku/nikki/????-??-??_*.yml",
-        "template": "templates/kiroku_nikki.yml",
-        "rule": "dojo/files.yml",
-    },
-    {
-        "label": "kiroku/makimono files: keys missing vs templates/kiroku_makimono.yml",
-        "proxy": "generated_files_match_template",
-        "glob": "kiroku/makimono/*.yml",
-        "template": "templates/kiroku_makimono.yml",
-        "rule": "dojo/files.yml",
-    },
-]
-
-NIKKI_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+)_[^_]+\.yml$")
+def _build_structure_checks(spec: dict) -> list[dict]:
+    """Generate file_exists checks from structure.yml structure block."""
+    checks = []
+    for path_key, meta in (spec.get("structure") or {}).items():
+        is_dir = path_key.endswith("/")
+        target = path_key.rstrip("/")
+        label = f"{path_key} not found"
+        checks.append({
+            "label": label,
+            "proxy": "file_exists",
+            "target": target,
+            "file": path_key,
+            "rule": "dojo/structure.yml",
+        })
+    return checks
 
 
-def _read_yaml_file(path: Path) -> dict:
-    try:
-        content = path.read_text(encoding="utf-8")
-        parsed = yaml.safe_load(content)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+def _build_gakusei_key_checks(spec: dict) -> list[dict]:
+    """Generate yaml_key_exists checks from gakusei_state_file required_keys."""
+    state_file = spec.get("gakusei_state_file", ".gakusei.yml")
+    required_keys = (
+        (spec.get("structure") or {})
+        .get(state_file, {})
+        .get("required_keys") or []
+    )
+    checks = []
+    for key in required_keys:
+        checks.append({
+            "label": f"{state_file} missing '{key}' field",
+            "proxy": "yaml_key_exists",
+            "file": state_file,
+            "key": key,
+            "rule": "dojo/structure.yml",
+        })
+    return checks
 
 
-def _nikki_subjects(nikki_dir: Path) -> set:
-    """Extract unique subjects from valid nikki filenames."""
-    subjects = set()
-    for f in nikki_dir.iterdir():
-        if f.suffix != ".yml":
+def _build_file_key_checks(spec: dict) -> list[dict]:
+    """Generate generated_files_match_template checks from structure.yml.
+
+    For each dir entry that has filename_pattern + template, build a glob
+    from the filename_pattern and point it at the local template copy.
+    """
+    checks = []
+    for path_key, meta in (spec.get("structure") or {}).items():
+        if not path_key.endswith("/"):
             continue
-        m = NIKKI_PATTERN.match(f.name)
-        if m:
-            subjects.add(m.group(1))
-    return subjects
+        pattern = (meta or {}).get("filename_pattern")
+        template_src = (meta or {}).get("template", "")
+        if not pattern or not template_src:
+            continue
+        # Convert 'YYYY-MM-DD_{x}_{y}.yml' -> 'YYYY-MM-DD_*_*.yml'
+        glob_pattern = re.sub(r"\{[^}]+\}", "*", pattern)
+        glob_pattern = glob_pattern.replace("YYYY", "????").replace("MM", "??").replace("DD", "??")
+        dir_glob = path_key.rstrip("/") + "/" + glob_pattern
+        # template_src is like 'frameworks/dojo/templates/kiroku_nikki.yml'
+        # locally we keep templates/ stripped of the framework prefix
+        template_local = "templates/" + template_src.split("/templates/")[-1]
+        label_dir = path_key.rstrip("/").split("/")[-1]
+        checks.append({
+            "label": f"{path_key} files: keys missing vs {template_local}",
+            "proxy": "generated_files_match_template",
+            "glob": dir_glob,
+            "template": template_local,
+            "rule": "dojo/files.yml",
+        })
+    return checks
 
 
-def _check_refs(repo: Path, report: Report) -> None:
-    gakusei = _read_yaml_file(repo / ".gakusei.yml")
-    gakusei_subjects = set(gakusei.get("subjects", {}).keys()) if isinstance(gakusei.get("subjects"), dict) else set()
-    last_session = gakusei.get("last_session") or {}
-    ls_subject = last_session.get("subject") if isinstance(last_session, dict) else None
+def _build_cross_ref_checks(spec: dict) -> list[dict]:
+    """Convert structure.yml cross_refs entries into run_check dicts."""
+    state_file = spec.get("gakusei_state_file", ".gakusei.yml")
+    checks = []
+    for entry in (spec.get("cross_refs") or []):
+        check = dict(entry)
+        check["proxy"] = "cross_ref_check"
+        check["gakusei_state_file"] = state_file
+        check["rule"] = "dojo/structure.yml"
+        # Inject filename_regex from the matching structure dir if present
+        source = check.get("source", "")
+        if source.endswith("/"):
+            meta = (spec.get("structure") or {}).get(source, {})
+            if meta and meta.get("filename_regex"):
+                check.setdefault("source_regex", meta["filename_regex"])
+        checks.append(check)
+    return checks
 
-    nikki_dir = repo / "kiroku" / "nikki"
-    makimono_dir = repo / "kiroku" / "makimono"
 
-    # --- 0. kiroku/nikki/ must contain only .yml files ---
-    if nikki_dir.is_dir():
-        wrong_ext = sorted(
-            str(f.relative_to(repo))
-            for f in nikki_dir.iterdir()
-            if f.is_file() and f.name not in _IGNORED_NAMES and f.suffix != ".yml"
-        )
-        if wrong_ext:
-            detail = "non-.yml files found <- " + ", ".join(wrong_ext)
-            report.add("kiroku/nikki/ contains non-.yml files", False, detail, rule="dojo/refs.yml")
-            for path in wrong_ext:
-                _gh_annotation("error", f"giskard ERROR: kiroku/nikki file must be .yml, got {path}", path)
-        else:
-            report.add("kiroku/nikki/ contains only .yml files", True)
+# ---------------------------------------------------------------------------
+# Filename pattern validation
+# (kept as code: needs per-file gh_annotation + specific error messages)
+# ---------------------------------------------------------------------------
 
-    # --- 1. nikki filename pattern ---
-    if nikki_dir.is_dir():
-        bad_names = [
-            str(f.relative_to(repo))
-            for f in nikki_dir.iterdir()
-            if f.suffix == ".yml" and not NIKKI_PATTERN.match(f.name)
-        ]
+def _check_filename_patterns(repo: Path, report: Report, spec: dict) -> None:
+    """Validate nikki and makimono filenames against structure.yml patterns."""
+    structure = spec.get("structure") or {}
+
+    for dir_key, meta in structure.items():
+        if not dir_key.endswith("/"):
+            continue
+        regex_str = (meta or {}).get("filename_regex")
+        type_values = (meta or {}).get("type_values")
+        if not regex_str:
+            continue
+
+        dir_path = repo / dir_key.rstrip("/")
+        if not dir_path.is_dir():
+            continue
+
+        pattern = re.compile(regex_str)
+        # Which group index carries the 'type' field?
+        groups = (meta or {}).get("filename_groups") or {}
+        type_group = next((int(k) for k, v in groups.items() if v == "type"), None)
+
+        bad_names, bad_types, good = [], [], []
+        for f in dir_path.iterdir():
+            if f.name in _IGNORED_NAMES or f.suffix != ".yml":
+                continue
+            m = pattern.match(f.name)
+            if not m:
+                bad_names.append(str(f.relative_to(repo)))
+            elif type_group and type_values:
+                try:
+                    t = m.group(type_group)
+                except IndexError:
+                    t = ""
+                if t not in type_values:
+                    bad_types.append(f"{f.name} (type='{t}')")
+                else:
+                    good.append(f.name)
+            else:
+                good.append(f.name)
+
+        dir_label = dir_key.rstrip("/")
         if bad_names:
             detail = "invalid filename pattern <- " + ", ".join(sorted(bad_names))
-            report.add("kiroku/nikki filenames: pattern YYYY-MM-DD_{subject}_{type}.yml not respected", False, detail, rule="dojo/refs.yml")
-            _gh_annotation("error", "giskard ERROR: kiroku/nikki invalid filename", bad_names[0])
+            report.add(f"{dir_key} filenames: pattern not respected", False, detail, rule="dojo/structure.yml")
+            _gh_annotation("error", f"giskard ERROR: {dir_key} invalid filename", bad_names[0])
+        elif bad_types:
+            allowed = "|".join(type_values)
+            detail = f"invalid type (must be {allowed}) <- " + ", ".join(sorted(bad_types))
+            report.add(f"{dir_key} filenames: invalid type value", False, detail, rule="dojo/structure.yml")
         else:
-            nikki_files = [f for f in nikki_dir.iterdir() if f.suffix == ".yml"]
-            report.add(f"all kiroku/nikki filenames match pattern ({len(nikki_files)} files)", True)
-    else:
-        report.add("kiroku/nikki/ not found — skipping filename check", None)
+            report.add(f"all {dir_key} filenames match pattern ({len(good)} files)", True)
 
-    # --- 2. last_session.subject → kata/{subject}/ exists ---
-    if ls_subject:
-        kata_dir = repo / "kata" / ls_subject
-        if not kata_dir.is_dir():
-            report.add(f"last_session.subject '{ls_subject}' has no kata/{ls_subject}/ directory", False,
-                       f"kata/{ls_subject}/ not found", rule="dojo/refs.yml")
-            _gh_annotation("error", f"giskard ERROR: kata/{ls_subject}/ missing", ".gakusei.yml")
-        else:
-            report.add(f"last_session.subject '{ls_subject}' → kata/{ls_subject}/ exists", True)
-    else:
-        report.add("last_session.subject empty — skipping kata ref check", None)
 
-    # --- 3. nikki subject → gakusei.subjects ---
-    if nikki_dir.is_dir() and gakusei_subjects:
-        nikki_subs = _nikki_subjects(nikki_dir)
-        unknown = sorted(nikki_subs - gakusei_subjects)
-        if unknown:
-            detail = "subjects in nikki not in .gakusei.yml <- " + ", ".join(unknown)
-            report.add("nikki subjects not declared in .gakusei.yml", False, detail, rule="dojo/refs.yml")
-            _gh_annotation("error", "giskard ERROR: nikki subject not in gakusei", str(nikki_dir))
-        elif nikki_subs:
-            report.add(f"all nikki subjects declared in .gakusei.yml ({len(nikki_subs)} subjects)", True)
-        else:
-            report.add("no valid nikki files found — skipping nikki→gakusei check", None)
-    else:
-        report.add("skipping nikki→gakusei check (no nikki dir or no subjects)", None)
-
-    # --- 4. makimono subject → gakusei.subjects ---
-    if makimono_dir.is_dir() and gakusei_subjects:
-        makimono_files = [f for f in makimono_dir.iterdir() if f.suffix == ".yml"]
-        unknown_maki = sorted(f.stem for f in makimono_files if f.stem not in gakusei_subjects)
-        if unknown_maki:
-            detail = "makimono files with no matching subject in .gakusei.yml <- " + ", ".join(unknown_maki)
-            report.add("makimono subjects not declared in .gakusei.yml", False, detail, rule="dojo/refs.yml")
-            _gh_annotation("error", "giskard ERROR: makimono subject not in gakusei", str(makimono_dir))
-        elif makimono_files:
-            report.add(f"all makimono subjects declared in .gakusei.yml ({len(makimono_files)} files)", True)
-        else:
-            report.add("no makimono files found — skipping makimono→gakusei check", None)
-    else:
-        report.add("skipping makimono→gakusei check (no makimono dir or no subjects)", None)
-
-    # --- 5. nikki subject → kata/{subject}/ exists ---
-    if nikki_dir.is_dir():
-        nikki_subs = _nikki_subjects(nikki_dir)
-        missing_kata = defaultdict(list)
-        for sub in sorted(nikki_subs):
-            if not (repo / "kata" / sub).is_dir():
-                missing_kata[sub].append(f"kata/{sub}/")
-        if missing_kata:
-            for sub, paths in sorted(missing_kata.items()):
-                detail = "kata dir missing <- " + ", ".join(paths)
-                report.add(f"nikki subject '{sub}' has no kata/{sub}/ directory", False, detail, rule="dojo/refs.yml")
-                _gh_annotation("error", f"giskard ERROR: kata/{sub}/ missing for nikki subject", str(nikki_dir))
-        elif nikki_subs:
-            report.add(f"all nikki subjects have kata/ directory ({len(nikki_subs)} subjects)", True)
-        else:
-            report.add("no valid nikki files found — skipping nikki→kata check", None)
-    else:
-        report.add("kiroku/nikki/ not found — skipping nikki→kata check", None)
-
-    # --- 6. nikki → makimono consistency (WARNING only) ---
-    # Makimono files are created only at level_up, not at study_open.
-    # A dojo with nikki but no makimono is a valid pre-level-up state.
-    if nikki_dir.is_dir() and makimono_dir.is_dir():
-        nikki_subs = _nikki_subjects(nikki_dir)
-        makimono_subjects = {f.stem for f in makimono_dir.iterdir() if f.suffix == ".yml"}
-        missing_maki = sorted(nikki_subs - makimono_subjects)
-        if missing_maki:
-            detail = "nikki subjects with no makimono yet <- " + ", ".join(
-                f"kiroku/makimono/{s}.yml" for s in missing_maki
-            )
-            report.add("nikki subjects missing corresponding makimono file", None, detail, rule="dojo/refs.yml")
-        elif nikki_subs:
-            report.add(f"all nikki subjects have a makimono file ({len(nikki_subs)} subjects)", True)
-        else:
-            report.add("no valid nikki files found — skipping nikki→makimono check", None)
-    else:
-        report.add("skipping nikki→makimono check (nikki or makimono dir missing)", None)
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def run(repo: Path, report: Report) -> None:
+    spec = fetch_zeroth_structure("dojo")
+    if not spec:
+        report.add(
+            "could not fetch zeroth/frameworks/dojo/structure.yml — all dojo checks skipped",
+            None, "check network access to raw.githubusercontent.com"
+        )
+        return
+
+    state_file = spec.get("gakusei_state_file", ".gakusei.yml")
+
+    # --- Structure: required files and dirs ---
     report.section("dojo — structure")
-    for check in STRUCTURE_CHECKS_NO_GAKUSEI:
+    for check in _build_structure_checks(spec):
         run_check(repo, check, report)
 
-    gakusei_path = repo / ".gakusei.yml"
+    gakusei_path = repo / state_file
     if not gakusei_path.exists():
-        report.add(".gakusei.yml absent — onboarding not yet run", None,
-                   "run the dojo onboarding scenario to generate this file",
-                   rule="dojo/structure.yml", file=".gakusei.yml")
+        report.add(
+            f"{state_file} absent — onboarding not yet run", None,
+            "run the dojo onboarding scenario to generate this file",
+            rule="dojo/structure.yml", file=state_file
+        )
     else:
-        for check in GAKUSEI_KEY_CHECKS:
+        for check in _build_gakusei_key_checks(spec):
             run_check(repo, check, report)
 
+    # --- Files: template key coverage ---
     report.section("dojo — files")
-    for check in FILE_KEY_CHECKS:
+    for check in _build_file_key_checks(spec):
         run_check(repo, check, report)
 
+    # --- Refs: cross-file consistency ---
     report.section("dojo — refs")
-    _check_refs(repo, report)
+    _check_filename_patterns(repo, report, spec)
+    for check in _build_cross_ref_checks(spec):
+        run_check(repo, check, report)

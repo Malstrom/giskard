@@ -2,7 +2,7 @@
 """
 core.py — shared internals for giskard.
 
-Contains: proxy registry, Report, run_check.
+Contains: proxy registry, Report, run_check, fetch_zeroth_structure.
 No CLI, no framework logic, no imports from giskard or checks/.
 All modules (checks/*.py, giskard.py) import from here.
 """
@@ -15,6 +15,11 @@ from pathlib import Path
 
 # Sentinel for proxy execution errors (distinct from False = check failed)
 ERROR = "error"
+
+# In-process cache: (framework, ref) -> parsed structure dict
+_STRUCTURE_CACHE: dict = {}
+
+ZEROTH_RAW_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +61,39 @@ def _gh_annotation(level: str, message: str, file: str = ""):
         print(f"::{level} file={file}::{message}")
     else:
         print(f"::{level}::{message}")
+
+
+# ---------------------------------------------------------------------------
+# Zeroth structure fetcher
+# ---------------------------------------------------------------------------
+
+def fetch_zeroth_structure(framework: str, ref: str = "main") -> dict:
+    """Fetch and parse frameworks/{framework}/structure.yml from zeroth.
+
+    Returns the parsed dict, or {} on any error.
+    Result is cached in-process: repeated calls within one giskard run
+    cost only one HTTP request per (framework, ref) pair.
+    """
+    cache_key = (framework, ref)
+    if cache_key in _STRUCTURE_CACHE:
+        return _STRUCTURE_CACHE[cache_key]
+
+    url = f"{ZEROTH_RAW_BASE.format(ref=ref)}/{framework}/structure.yml"
+    raw = _fetch_url(url)
+    if not raw:
+        print(f"[giskard] WARNING: could not fetch structure.yml for '{framework}' from {url}")
+        _STRUCTURE_CACHE[cache_key] = {}
+        return {}
+
+    try:
+        parsed = yaml.safe_load(raw)
+        result = parsed if isinstance(parsed, dict) else {}
+    except yaml.YAMLError as e:
+        print(f"[giskard] WARNING: structure.yml for '{framework}' is not valid YAML: {e}")
+        result = {}
+
+    _STRUCTURE_CACHE[cache_key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +153,7 @@ def proxy_template_matches_zeroth(repo: Path, check: dict) -> tuple:
 
 
 def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
-    """Kept for backward compatibility. Fetches canonical template from remote.
-    Prefer proxy_generated_files_match_template for local validation.
-    """
+    """Kept for backward compatibility."""
     framework = check["framework"]
     template = check["template"]
     ref = check.get("ref", "main")
@@ -147,15 +183,6 @@ def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
 
 
 def proxy_generated_files_match_template(repo: Path, check: dict) -> tuple:
-    """Checks that every generated file matching a glob pattern contains
-    all root keys defined in the corresponding local template.
-
-    The template lives in templates/ inside the repo — no network calls.
-
-    check keys:
-      glob     — glob pattern relative to repo root (e.g. 'clients/*/inbox/*.yml')
-      template — path to local template relative to repo root (e.g. 'templates/inbox.yml')
-    """
     template_path = repo / check["template"]
     glob_pattern = check["glob"]
 
@@ -202,7 +229,6 @@ def proxy_yaml_key_exists(repo: Path, check: dict) -> tuple:
 
 
 def proxy_yaml_key_absent(repo: Path, check: dict) -> tuple:
-    """Passes if the key does NOT exist. Used for forbidden fields."""
     parsed = _parse_yaml(repo, check["file"])
     keys = check["key"].split(".")
     val = parsed
@@ -212,9 +238,6 @@ def proxy_yaml_key_absent(repo: Path, check: dict) -> tuple:
         if k not in val:
             return True, ""
         val = val[k]
-    present = True
-    if present:
-        print(f"    forbidden key '{check['key']}' is present")
     return False, f"forbidden key '{check['key']}' found"
 
 
@@ -318,7 +341,6 @@ def proxy_scenario_input_sources(repo: Path, check: dict) -> tuple:
 
 
 def proxy_scenario_no_forbidden_modules(repo: Path, check: dict) -> tuple:
-    """Verifies that handler actions do not contain say, ask, or propose."""
     FORBIDDEN = {"say", "ask", "propose"}
     parsed = _parse_yaml(repo, ".agent.yml")
     handlers = parsed.get("handlers", {}) or {}
@@ -395,6 +417,137 @@ def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Cross-ref check proxy
+# ---------------------------------------------------------------------------
+
+def _resolve_dotted(data: dict, dotted_key: str):
+    """Walk a dict by dotted key path. Returns the value or None."""
+    parts = dotted_key.split(".")
+    val = data
+    for p in parts:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(p)
+    return val
+
+
+def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
+    """
+    Execute a single cross_refs entry from structure.yml.
+
+    check keys (mirrors structure.yml cross_refs entry):
+      label             — already used by run_check as the report label
+      source            — 'last_session.{field}' OR a dir path like 'kiroku/nikki/'
+      source_group      — (int) which filename_regex group to extract (1-based)
+      source_regex      — regex string with capture groups
+      source_filter     — {group: int, value: str} to restrict to specific type
+      gakusei_state_file— filename of the state file (e.g. '.gakusei.yml')
+      target            — 'topics', 'goals' (state file key), or 'kata/{value}.md'
+      target_type       — 'keys' | 'file_exists' | 'file_glob'
+      target_glob_pattern — required when target_type is 'file_glob'
+      level             — 'error' | 'warning'
+    """
+    state_file = check.get("gakusei_state_file", ".gakusei.yml")
+    gakusei = _parse_yaml(repo, state_file)
+    source = check["source"]
+    target = check["target"]
+    target_type = check["target_type"]
+    level = check.get("level", "error")
+    is_warning = level == "warning"
+
+    # --- Resolve the set of values to check ---
+    values: set[str] = set()
+
+    if source.startswith("last_session."):
+        # Value comes from state file scalar field
+        field = source[len("last_session."):]
+        ls = gakusei.get("last_session") or {}
+        val = ls.get(field) if isinstance(ls, dict) else None
+        if val:
+            values = {str(val)}
+        else:
+            return None, f"{state_file} last_session.{field} is empty — skipped"
+
+    else:
+        # Value comes from filenames in a directory
+        source_dir = repo / source.rstrip("/")
+        if not source_dir.is_dir():
+            return None, f"{source} not found — skipped"
+
+        source_regex = check.get("source_regex", "")
+        source_group = check.get("source_group", 1)
+        source_filter = check.get("source_filter")
+        pattern = re.compile(source_regex) if source_regex else None
+
+        for f in source_dir.iterdir():
+            if f.suffix != ".yml" or f.name in {".keep", ".gitkeep"}:
+                continue
+            if pattern:
+                m = pattern.match(f.name)
+                if not m:
+                    continue
+                # Apply type filter if present
+                if source_filter:
+                    filter_group = source_filter.get("group", 2)
+                    filter_value = source_filter.get("value", "")
+                    try:
+                        if m.group(filter_group) != filter_value:
+                            continue
+                    except IndexError:
+                        continue
+                try:
+                    values.add(m.group(source_group))
+                except IndexError:
+                    continue
+            else:
+                values.add(f.stem)
+
+        if not values:
+            return None, f"no valid files found in {source} — skipped"
+
+    # --- Resolve the target and check each value ---
+    violations: list[str] = []
+
+    for value in sorted(values):
+        if target_type == "keys":
+            # value must be a key in state_file[target]
+            target_dict = _resolve_dotted(gakusei, target)
+            if not isinstance(target_dict, dict):
+                return None, f"{state_file}.{target} is not a dict or missing — skipped"
+            if value not in target_dict:
+                violations.append(value)
+
+        elif target_type == "file_exists":
+            # target path may contain {value} placeholder
+            resolved_path = target.replace("{value}", value)
+            if not (repo / resolved_path).exists():
+                violations.append(resolved_path)
+
+        elif target_type == "file_glob":
+            # target_glob_pattern with {value} placeholder, matched in target dir
+            target_dir_path = repo / target.rstrip("/")
+            glob_pattern = check.get("target_glob_pattern", "").replace("{value}", value)
+            if not glob_pattern:
+                return ERROR, "target_glob_pattern missing in cross_ref entry"
+            if not target_dir_path.is_dir():
+                violations.append(f"{target}{glob_pattern}")
+                continue
+            matches = list(target_dir_path.glob(glob_pattern))
+            if not matches:
+                violations.append(f"{target}{glob_pattern}")
+
+        else:
+            return ERROR, f"unknown target_type '{target_type}'"
+
+    if violations:
+        detail = "missing <- " + ", ".join(violations)
+        # Warnings become None (skip/warn), errors become False (fail)
+        return (None if is_warning else False), detail
+
+    return True, f"{len(values)} value(s) checked"
+
+
+# ---------------------------------------------------------------------------
 # Proxy registry
 # ---------------------------------------------------------------------------
 
@@ -423,6 +576,7 @@ PROXY_REGISTRY = {
     "token_count": proxy_token_count,
     "file_access_mode": proxy_file_access_mode,
     "write_ahead_rule": proxy_write_ahead_rule,
+    "cross_ref_check": proxy_cross_ref_check,
 }
 
 
@@ -431,15 +585,6 @@ PROXY_REGISTRY = {
 # ---------------------------------------------------------------------------
 
 def _section_framework(section_name: str) -> str:
-    """Extract framework name from a section label for grouping.
-
-    Naming conventions:
-      "zeroth — agent"            → "_zeroth_agent"  (special: always first)
-      "dojo@zeroth — structure"   → "dojo"
-      "aurora@zeroth — scenarios" → "aurora"
-      "dojo — structure"          → "dojo"
-      anything else               → the raw section name
-    """
     if section_name == "zeroth — agent":
         return "_zeroth_agent"
     if "@" in section_name:
@@ -450,7 +595,6 @@ def _section_framework(section_name: str) -> str:
 
 
 def _framework_display(fw_key: str) -> str:
-    """Human-readable header for a framework group."""
     if fw_key == "_zeroth_agent":
         return "zeroth — agent"
     return fw_key
@@ -526,18 +670,15 @@ class Report:
             "",
         ]
 
-        # Group entries by section, preserving insertion order
         by_section: dict[str, list] = {}
         for e in self.entries:
             by_section.setdefault(e["section"], []).append(e)
 
-        # Group sections by framework, zeroth — agent always first
         by_framework: dict[str, list[str]] = {}
         for section_name in by_section:
             fw = _section_framework(section_name)
             by_framework.setdefault(fw, []).append(section_name)
 
-        # Sort: _zeroth_agent first, then alphabetical
         fw_order = sorted(
             by_framework.keys(),
             key=lambda k: (0 if k == "_zeroth_agent" else 1, k),
@@ -546,8 +687,6 @@ class Report:
         body = []
         for fw_key in fw_order:
             fw_sections = by_framework[fw_key]
-
-            # Collect all items in this framework group
             all_items = []
             for sec in fw_sections:
                 all_items.extend(by_section[sec])
@@ -567,7 +706,6 @@ class Report:
             body.append(f"### {_framework_display(fw_key)} {fw_status}")
             body.append("")
 
-            # Within the framework, render each sub-section
             for sec in fw_sections:
                 items = by_section[sec]
                 n_passed = sum(1 for i in items if i["kind"] == "passed")
@@ -575,9 +713,7 @@ class Report:
                 n_skipped = sum(1 for i in items if i["kind"] == "skipped")
                 n_errored = sum(1 for i in items if i["kind"] == "errored")
 
-                # Only show sub-section label when the framework has multiple sections
                 if len(fw_sections) > 1:
-                    # Extract the check type from section name (e.g. "structure", "scenarios")
                     check_type = sec.split(" — ")[-1] if " — " in sec else sec
                     if n_failed == 0 and n_errored == 0 and n_skipped == 0:
                         body.append(f"**{check_type}** \u2705 {n_passed}/{len(items)}")
