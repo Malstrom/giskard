@@ -2,7 +2,8 @@
 """
 core.py — shared internals for giskard.
 
-Contains: proxy registry, Report, run_check, fetch_zeroth_structure.
+Contains: proxy registry, Report, run_check, fetch_zeroth_structure,
+fetch_zeroth_rules.
 No CLI, no framework logic, no imports from giskard or checks/.
 All modules (checks/*.py, giskard.py) import from here.
 """
@@ -18,8 +19,11 @@ ERROR = "error"
 
 # In-process cache: (framework, ref) -> parsed structure dict
 _STRUCTURE_CACHE: dict = {}
+# In-process cache: ref -> parsed rules/agent.yml dict
+_RULES_CACHE: dict = {}
 
 ZEROTH_RAW_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
+ZEROTH_RULES_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/rules"
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +97,42 @@ def fetch_zeroth_structure(framework: str, ref: str = "main") -> dict:
         result = {}
 
     _STRUCTURE_CACHE[cache_key] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Zeroth rules fetcher
+# ---------------------------------------------------------------------------
+
+def fetch_zeroth_rules(rule_file: str, ref: str = "main") -> dict:
+    """Fetch and parse a rules/{rule_file} from zeroth.
+
+    Returns the parsed dict, or {} on any error.
+    Result is cached in-process per (rule_file, ref).
+
+    Usage:
+        rules = fetch_zeroth_rules("agent.yml")
+        scenarios_fields = rules.get("scenarios", {}).get("required_fields", [])
+    """
+    cache_key = (rule_file, ref)
+    if cache_key in _RULES_CACHE:
+        return _RULES_CACHE[cache_key]
+
+    url = f"{ZEROTH_RULES_BASE.format(ref=ref)}/{rule_file}"
+    raw = _fetch_url(url)
+    if not raw:
+        print(f"[giskard] WARNING: could not fetch rules/{rule_file} from {url} — using hardcoded fallback")
+        _RULES_CACHE[cache_key] = {}
+        return {}
+
+    try:
+        parsed = yaml.safe_load(raw)
+        result = parsed if isinstance(parsed, dict) else {}
+    except yaml.YAMLError as e:
+        print(f"[giskard] WARNING: rules/{rule_file} is not valid YAML: {e} — using hardcoded fallback")
+        result = {}
+
+    _RULES_CACHE[cache_key] = result
     return result
 
 
@@ -459,7 +499,6 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
     values: set[str] = set()
 
     if source.startswith("last_session."):
-        # Value comes from state file scalar field
         field = source[len("last_session."):]
         ls = gakusei.get("last_session") or {}
         val = ls.get(field) if isinstance(ls, dict) else None
@@ -469,7 +508,6 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
             return None, f"{state_file} last_session.{field} is empty — skipped"
 
     else:
-        # Value comes from filenames in a directory
         source_dir = repo / source.rstrip("/")
         if not source_dir.is_dir():
             return None, f"{source} not found — skipped"
@@ -486,7 +524,6 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
                 m = pattern.match(f.name)
                 if not m:
                     continue
-                # Apply type filter if present
                 if source_filter:
                     filter_group = source_filter.get("group", 2)
                     filter_value = source_filter.get("value", "")
@@ -510,7 +547,6 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
 
     for value in sorted(values):
         if target_type == "keys":
-            # value must be a key in state_file[target]
             target_dict = _resolve_dotted(gakusei, target)
             if not isinstance(target_dict, dict):
                 return None, f"{state_file}.{target} is not a dict or missing — skipped"
@@ -518,13 +554,11 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
                 violations.append(value)
 
         elif target_type == "file_exists":
-            # target path may contain {value} placeholder
             resolved_path = target.replace("{value}", value)
             if not (repo / resolved_path).exists():
                 violations.append(resolved_path)
 
         elif target_type == "file_glob":
-            # target_glob_pattern with {value} placeholder, matched in target dir
             target_dir_path = repo / target.rstrip("/")
             glob_pattern = check.get("target_glob_pattern", "").replace("{value}", value)
             if not glob_pattern:
@@ -541,7 +575,6 @@ def proxy_cross_ref_check(repo: Path, check: dict) -> tuple:
 
     if violations:
         detail = "missing <- " + ", ".join(violations)
-        # Warnings become None (skip/warn), errors become False (fail)
         return (None if is_warning else False), detail
 
     return True, f"{len(values)} value(s) checked"

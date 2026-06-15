@@ -4,12 +4,44 @@ checks/agent.py — zeroth laws: agent manifest
 Validates .agent.yml structure against the canonical block spec.
 See: https://github.com/Malstrom/zeroth/issues/100
 These checks are framework-agnostic.
+
+scenarios.required_subkeys is inferred at module load from
+zeroth rules/agent.yml (scenarios.required_fields).
+Falls back to SCENARIOS_REQUIRED_FALLBACK on network failure.
 """
 
 from pathlib import Path
-from core import run_check, Report
+from core import run_check, Report, fetch_zeroth_rules
 
 VALID_ACCESS = ["read-only", "read-write", "append-only", "write-once"]
+
+# Fallback used only if zeroth rules/agent.yml cannot be fetched.
+SCENARIOS_REQUIRED_FALLBACK = ["spec", "read_before_responding", "on_no_match"]
+
+
+def _load_scenarios_required() -> list[str]:
+    """Infer required scenarios subkeys from zeroth rules/agent.yml.
+
+    Returns the list from scenarios.required_fields, or the hardcoded
+    fallback if the fetch fails.
+    """
+    rules = fetch_zeroth_rules("agent.yml")
+    fields = (
+        rules
+        .get("scenarios", {})
+        .get("required_fields", [])
+    )
+    if fields and isinstance(fields, list):
+        return fields
+    print(
+        "[giskard] WARNING: could not infer scenarios.required_fields from "
+        "zeroth rules/agent.yml — using fallback"
+    )
+    return SCENARIOS_REQUIRED_FALLBACK
+
+
+_SCENARIOS_REQUIRED = _load_scenarios_required()
+
 
 CHECKS = [
     # ---------------------------------------------------------------------------
@@ -150,14 +182,14 @@ CHECKS = [
     },
 
     # ---------------------------------------------------------------------------
-    # scenarios subkeys
+    # scenarios subkeys — inferred from zeroth rules/agent.yml at module load
     # ---------------------------------------------------------------------------
     {
         "label": "scenarios has required keys",
         "proxy": "yaml_subkeys_exist",
         "file": ".agent.yml",
         "key": "scenarios",
-        "required_subkeys": ["file", "read_before_responding", "on_no_match"],
+        "required_subkeys": _SCENARIOS_REQUIRED,
         "rule": "agent.yml",
     },
     {
