@@ -63,6 +63,24 @@ def _gh_annotation(level: str, message: str, file: str = ""):
         print(f"::{level}::{message}")
 
 
+def _resolve_template_content(repo: Path, template_path: str, zeroth_ref: str = "main") -> str:
+    """
+    Resolve a template path to its content.
+
+    If template_path starts with 'frameworks/', it is a zeroth-canonical path
+    and must be fetched from raw.githubusercontent.com/Malstrom/zeroth.
+    Otherwise it is a local path relative to the repo root.
+    """
+    if template_path.startswith("frameworks/"):
+        url = f"https://raw.githubusercontent.com/Malstrom/zeroth/{zeroth_ref}/{template_path}"
+        content = _fetch_url(url)
+        if not content:
+            print(f"[giskard] WARNING: could not fetch template from zeroth: {url}")
+        return content
+    else:
+        return _read_file(repo, template_path)
+
+
 # ---------------------------------------------------------------------------
 # Zeroth structure fetcher
 # ---------------------------------------------------------------------------
@@ -183,20 +201,30 @@ def proxy_template_keys_match_framework(repo: Path, check: dict) -> tuple:
 
 
 def proxy_generated_files_match_template(repo: Path, check: dict) -> tuple:
-    template_path = repo / check["template"]
+    template_path_str = check["template"]
     glob_pattern = check["glob"]
+    zeroth_ref = check.get("zeroth_ref", "main")
 
-    if not template_path.exists():
-        return None, f"{check['template']} not found — skipped"
+    # Resolve template content: from zeroth if frameworks/ path, else local.
+    template_content = _resolve_template_content(repo, template_path_str, zeroth_ref)
+    if not template_content:
+        return None, f"{template_path_str} not found — skipped"
 
     try:
-        raw = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+        raw = yaml.safe_load(template_content)
         template_keys = set(raw.keys()) if isinstance(raw, dict) else set()
+        # Strip schema-only meta keys that are not present in generated files
+        template_keys -= {"_format", "_required", "_optional", "_invariants"}
+        # If template uses _required dict, extract its keys instead
+        if not template_keys and isinstance(raw, dict) and "_required" in raw:
+            required = raw["_required"]
+            if isinstance(required, dict):
+                template_keys = set(required.keys())
     except yaml.YAMLError:
-        return None, f"{check['template']} is not valid YAML — skipped"
+        return None, f"{template_path_str} is not valid YAML — skipped"
 
     if not template_keys:
-        return None, f"{check['template']} has no root keys — skipped"
+        return None, f"{template_path_str} has no root keys — skipped"
 
     files = sorted(repo.glob(glob_pattern))
     if not files:
