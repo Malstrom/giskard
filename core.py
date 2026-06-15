@@ -19,7 +19,7 @@ ERROR = "error"
 
 # In-process cache: (framework, ref) -> parsed structure dict
 _STRUCTURE_CACHE: dict = {}
-# In-process cache: ref -> parsed rules/agent.yml dict
+# In-process cache: ref -> parsed rules dict
 _RULES_CACHE: dict = {}
 
 ZEROTH_RAW_BASE = "https://raw.githubusercontent.com/Malstrom/zeroth/{ref}/frameworks"
@@ -108,7 +108,7 @@ def fetch_zeroth_rules(rule_file: str, ref: str = "main") -> dict:
     """Fetch and parse a rules/{rule_file} from zeroth.
 
     Returns the parsed dict, or {} on any error.
-    Result is cached in-process per (rule_file, ref).
+    Result is cached in-process per (rule_file, ref) pair.
 
     Usage:
         rules = fetch_zeroth_rules("agent.yml")
@@ -121,7 +121,7 @@ def fetch_zeroth_rules(rule_file: str, ref: str = "main") -> dict:
     url = f"{ZEROTH_RULES_BASE.format(ref=ref)}/{rule_file}"
     raw = _fetch_url(url)
     if not raw:
-        print(f"[giskard] WARNING: could not fetch rules/{rule_file} from {url} — using hardcoded fallback")
+        print(f"[giskard] WARNING: could not fetch rules/{rule_file} from {url}")
         _RULES_CACHE[cache_key] = {}
         return {}
 
@@ -129,7 +129,7 @@ def fetch_zeroth_rules(rule_file: str, ref: str = "main") -> dict:
         parsed = yaml.safe_load(raw)
         result = parsed if isinstance(parsed, dict) else {}
     except yaml.YAMLError as e:
-        print(f"[giskard] WARNING: rules/{rule_file} is not valid YAML: {e} — using hardcoded fallback")
+        print(f"[giskard] WARNING: rules/{rule_file} is not valid YAML: {e}")
         result = {}
 
     _RULES_CACHE[cache_key] = result

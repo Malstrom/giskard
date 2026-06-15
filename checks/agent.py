@@ -5,9 +5,9 @@ Validates .agent.yml structure against the canonical block spec.
 See: https://github.com/Malstrom/zeroth/issues/100
 These checks are framework-agnostic.
 
-scenarios.required_subkeys is inferred at module load from
-zeroth rules/agent.yml (scenarios.required_fields).
-Falls back to SCENARIOS_REQUIRED_FALLBACK on network failure.
+scenarios.required_subkeys is inferred from zeroth rules/agent.yml at
+runtime via fetch_zeroth_rules(). Falls back to hardcoded defaults if
+the fetch fails.
 """
 
 from pathlib import Path
@@ -15,32 +15,25 @@ from core import run_check, Report, fetch_zeroth_rules
 
 VALID_ACCESS = ["read-only", "read-write", "append-only", "write-once"]
 
-# Fallback used only if zeroth rules/agent.yml cannot be fetched.
-SCENARIOS_REQUIRED_FALLBACK = ["spec", "read_before_responding", "on_no_match"]
+# Fallback used when zeroth rules/agent.yml cannot be fetched.
+_SCENARIOS_REQUIRED_SUBKEYS_DEFAULT = ["spec", "read_before_responding", "on_no_match"]
 
 
-def _load_scenarios_required() -> list[str]:
-    """Infer required scenarios subkeys from zeroth rules/agent.yml.
+def _get_scenarios_required_subkeys() -> list[str]:
+    """Fetch scenarios.required_fields from zeroth rules/agent.yml.
 
-    Returns the list from scenarios.required_fields, or the hardcoded
-    fallback if the fetch fails.
+    Returns the list of required subkeys, falling back to the hardcoded
+    default if zeroth is unreachable or the field is missing.
     """
     rules = fetch_zeroth_rules("agent.yml")
-    fields = (
-        rules
-        .get("scenarios", {})
-        .get("required_fields", [])
-    )
+    fields = rules.get("scenarios", {}).get("required_fields", [])
     if fields and isinstance(fields, list):
         return fields
     print(
-        "[giskard] WARNING: could not infer scenarios.required_fields from "
-        "zeroth rules/agent.yml — using fallback"
+        "[giskard] WARNING: could not load scenarios.required_fields from "
+        "zeroth rules/agent.yml — using hardcoded defaults"
     )
-    return SCENARIOS_REQUIRED_FALLBACK
-
-
-_SCENARIOS_REQUIRED = _load_scenarios_required()
+    return _SCENARIOS_REQUIRED_SUBKEYS_DEFAULT
 
 
 CHECKS = [
@@ -182,15 +175,17 @@ CHECKS = [
     },
 
     # ---------------------------------------------------------------------------
-    # scenarios subkeys — inferred from zeroth rules/agent.yml at module load
+    # scenarios subkeys — inferred from zeroth rules/agent.yml at runtime.
+    # required_subkeys is populated in run() before executing checks.
     # ---------------------------------------------------------------------------
     {
         "label": "scenarios has required keys",
         "proxy": "yaml_subkeys_exist",
         "file": ".agent.yml",
         "key": "scenarios",
-        "required_subkeys": _SCENARIOS_REQUIRED,
+        "required_subkeys": [],  # populated at run() time
         "rule": "agent.yml",
+        "_dynamic": "scenarios_required_subkeys",
     },
     {
         "label": "scenarios.read_before_responding == true",
@@ -268,6 +263,9 @@ CHECKS = [
 
 
 def run(repo: Path, report: Report) -> None:
-    report.section("zeroth — agent")
+    # Resolve dynamic required_subkeys once per run (one HTTP fetch, cached).
+    scenarios_subkeys = _get_scenarios_required_subkeys()
     for check in CHECKS:
+        if check.get("_dynamic") == "scenarios_required_subkeys":
+            check = {**check, "required_subkeys": scenarios_subkeys}
         run_check(repo, check, report)
