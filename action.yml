@@ -69,8 +69,8 @@ runs:
           echo "No report file found at $REPORT, skipping comment."
           exit 0
         fi
-        gh pr comment ${{ github.event.pull_request.number }} \\
-          --repo ${{ github.repository }} \\
+        gh pr comment ${{ github.event.pull_request.number }} \
+          --repo ${{ github.repository }} \
           --body-file "$REPORT"
 
     - name: Upload report
