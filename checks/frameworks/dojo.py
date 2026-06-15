@@ -72,7 +72,9 @@ def _build_file_key_checks(spec: dict) -> list[dict]:
     """Generate generated_files_match_template checks from structure.yml.
 
     For each dir entry that has filename_pattern + template, build a glob
-    from the filename_pattern and point it at the local template copy.
+    from the filename_pattern and pass the original template_src path.
+    If template_src starts with 'frameworks/', _resolve_template_content
+    in core.py will fetch it from zeroth. Otherwise treated as local.
     """
     checks = []
     for path_key, meta in (spec.get("structure") or {}).items():
@@ -82,19 +84,17 @@ def _build_file_key_checks(spec: dict) -> list[dict]:
         template_src = (meta or {}).get("template", "")
         if not pattern or not template_src:
             continue
-        # Convert 'YYYY-MM-DD_{x}_{y}.yml' -> 'YYYY-MM-DD_*_*.yml'
+        # Convert 'YYYY-MM-DD_{x}_{y}.yml' -> '????-??-??_*_*.yml'
         glob_pattern = re.sub(r"\{[^}]+\}", "*", pattern)
         glob_pattern = glob_pattern.replace("YYYY", "????").replace("MM", "??").replace("DD", "??")
         dir_glob = path_key.rstrip("/") + "/" + glob_pattern
-        # template_src is like 'frameworks/dojo/templates/kiroku_nikki.yml'
-        # locally we keep templates/ stripped of the framework prefix
-        template_local = "templates/" + template_src.split("/templates/")[-1]
-        label_dir = path_key.rstrip("/").split("/")[-1]
+        # Pass template_src unchanged — _resolve_template_content handles
+        # zeroth paths (starts with 'frameworks/') vs local paths.
         checks.append({
-            "label": f"{path_key} files: keys missing vs {template_local}",
+            "label": f"{path_key} files: keys missing vs template",
             "proxy": "generated_files_match_template",
             "glob": dir_glob,
-            "template": template_local,
+            "template": template_src,
             "rule": "dojo/files.yml",
         })
     return checks
