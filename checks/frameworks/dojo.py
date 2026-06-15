@@ -35,11 +35,9 @@ def _build_structure_checks(spec: dict) -> list[dict]:
     """Generate file_exists checks from structure.yml structure block."""
     checks = []
     for path_key, meta in (spec.get("structure") or {}).items():
-        is_dir = path_key.endswith("/")
         target = path_key.rstrip("/")
-        label = f"{path_key} not found"
         checks.append({
-            "label": label,
+            "label": f"{path_key} not found",
             "proxy": "file_exists",
             "target": target,
             "file": path_key,
@@ -56,25 +54,25 @@ def _build_gakusei_key_checks(spec: dict) -> list[dict]:
         .get(state_file, {})
         .get("required_keys") or []
     )
-    checks = []
-    for key in required_keys:
-        checks.append({
+    return [
+        {
             "label": f"{state_file} missing '{key}' field",
             "proxy": "yaml_key_exists",
             "file": state_file,
             "key": key,
             "rule": "dojo/structure.yml",
-        })
-    return checks
+        }
+        for key in required_keys
+    ]
 
 
-def _build_file_key_checks(spec: dict) -> list[dict]:
+def _build_file_key_checks(repo: Path, spec: dict) -> list[dict]:
     """Generate generated_files_match_template checks from structure.yml.
 
-    For each dir entry that has filename_pattern + template, build a glob
-    from the filename_pattern and pass the original template_src path.
-    If template_src starts with 'frameworks/', _resolve_template_content
-    in core.py will fetch it from zeroth. Otherwise treated as local.
+    For each dir entry with filename_pattern + template:
+    - pass template_src unchanged (_resolve_template_content handles zeroth paths)
+    - skip silently if the dir has no matching files AND access == 'write-once'
+      (empty write-once dirs are normal at repo creation time)
     """
     checks = []
     for path_key, meta in (spec.get("structure") or {}).items():
@@ -84,12 +82,20 @@ def _build_file_key_checks(spec: dict) -> list[dict]:
         template_src = (meta or {}).get("template", "")
         if not pattern or not template_src:
             continue
-        # Convert 'YYYY-MM-DD_{x}_{y}.yml' -> '????-??-??_*_*.yml'
+
+        # Skip check entirely for write-once dirs that are still empty
+        if (meta or {}).get("access") == "write-once":
+            dir_path = repo / path_key.rstrip("/")
+            if dir_path.is_dir():
+                yml_files = [f for f in dir_path.iterdir()
+                             if f.suffix == ".yml" and f.name not in _IGNORED_NAMES]
+                if not yml_files:
+                    continue
+
         glob_pattern = re.sub(r"\{[^}]+\}", "*", pattern)
         glob_pattern = glob_pattern.replace("YYYY", "????").replace("MM", "??").replace("DD", "??")
         dir_glob = path_key.rstrip("/") + "/" + glob_pattern
-        # Pass template_src unchanged — _resolve_template_content handles
-        # zeroth paths (starts with 'frameworks/') vs local paths.
+
         checks.append({
             "label": f"{path_key} files: keys missing vs template",
             "proxy": "generated_files_match_template",
@@ -100,19 +106,35 @@ def _build_file_key_checks(spec: dict) -> list[dict]:
     return checks
 
 
-def _build_cross_ref_checks(spec: dict) -> list[dict]:
-    """Convert structure.yml cross_refs entries into run_check dicts."""
+def _build_cross_ref_checks(repo: Path, spec: dict) -> list[dict]:
+    """Convert structure.yml cross_refs entries into run_check dicts.
+
+    Cross_refs whose source is a write-once dir that is still empty
+    are silently dropped — nothing to cross-reference yet.
+    """
     state_file = spec.get("gakusei_state_file", ".gakusei.yml")
+    structure = spec.get("structure") or {}
     checks = []
     for entry in (spec.get("cross_refs") or []):
+        source = entry.get("source", "")
+
+        # Drop cross_refs whose source is a write-once dir with no files yet
+        if source.endswith("/"):
+            meta = structure.get(source, {})
+            if (meta or {}).get("access") == "write-once":
+                dir_path = repo / source.rstrip("/")
+                if dir_path.is_dir():
+                    yml_files = [f for f in dir_path.iterdir()
+                                 if f.suffix == ".yml" and f.name not in _IGNORED_NAMES]
+                    if not yml_files:
+                        continue
+
         check = dict(entry)
         check["proxy"] = "cross_ref_check"
         check["gakusei_state_file"] = state_file
         check["rule"] = "dojo/structure.yml"
-        # Inject filename_regex from the matching structure dir if present
-        source = check.get("source", "")
         if source.endswith("/"):
-            meta = (spec.get("structure") or {}).get(source, {})
+            meta = structure.get(source, {})
             if meta and meta.get("filename_regex"):
                 check.setdefault("source_regex", meta["filename_regex"])
         checks.append(check)
@@ -121,7 +143,6 @@ def _build_cross_ref_checks(spec: dict) -> list[dict]:
 
 # ---------------------------------------------------------------------------
 # Filename pattern validation
-# (kept as code: needs per-file gh_annotation + specific error messages)
 # ---------------------------------------------------------------------------
 
 def _check_filename_patterns(repo: Path, report: Report, spec: dict) -> None:
@@ -141,7 +162,6 @@ def _check_filename_patterns(repo: Path, report: Report, spec: dict) -> None:
             continue
 
         pattern = re.compile(regex_str)
-        # Which group index carries the 'type' field?
         groups = (meta or {}).get("filename_groups") or {}
         type_group = next((int(k) for k, v in groups.items() if v == "type"), None)
 
@@ -164,7 +184,10 @@ def _check_filename_patterns(repo: Path, report: Report, spec: dict) -> None:
             else:
                 good.append(f.name)
 
-        dir_label = dir_key.rstrip("/")
+        if not good and not bad_names and not bad_types:
+            # empty dir — nothing to validate
+            continue
+
         if bad_names:
             detail = "invalid filename pattern <- " + ", ".join(sorted(bad_names))
             report.add(f"{dir_key} filenames: pattern not respected", False, detail, rule="dojo/structure.yml")
@@ -210,11 +233,11 @@ def run(repo: Path, report: Report) -> None:
 
     # --- Files: template key coverage ---
     report.section("dojo — files")
-    for check in _build_file_key_checks(spec):
+    for check in _build_file_key_checks(repo, spec):
         run_check(repo, check, report)
 
     # --- Refs: cross-file consistency ---
     report.section("dojo — refs")
     _check_filename_patterns(repo, report, spec)
-    for check in _build_cross_ref_checks(spec):
+    for check in _build_cross_ref_checks(repo, spec):
         run_check(repo, check, report)
