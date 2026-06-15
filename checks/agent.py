@@ -25,8 +25,15 @@ VALID_ACCESS = ["read-only", "read-write", "append-only", "write-once"]
 
 # ---------------------------------------------------------------------------
 # Fallback — used when zeroth is unreachable (network error, rate limit, etc.)
+# Must stay in sync with zeroth/rules/agent.yml scenarios.required_fields.
+# Current source of truth: ["spec", "read_before_responding", "on_no_match"]
+# (zeroth#174 removed 'file' from required_fields)
 # ---------------------------------------------------------------------------
-_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK = ["file", "spec", "read_before_responding", "on_no_match"]
+_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK = ["spec", "read_before_responding", "on_no_match"]
+
+# Minimum keys that must always be present regardless of what zeroth returns.
+# A fetched list missing any of these is rejected and the fallback is used.
+_SCENARIOS_REQUIRED_SUBKEYS_MINIMUM = {"spec", "read_before_responding"}
 
 _ZEROTH_RULES_AGENT_URL = (
     "https://raw.githubusercontent.com/Malstrom/zeroth/main/rules/agent.yml"
@@ -37,7 +44,8 @@ def _fetch_scenarios_required_subkeys() -> list[str]:
     """Fetch rules/agent.yml from zeroth and derive scenarios.required_fields.
 
     Returns the list of required subkeys for the `scenarios` block.
-    Falls back to ``_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK`` on any error.
+    Falls back to ``_SCENARIOS_REQUIRED_SUBKEYS_FALLBACK`` on any error or
+    if the fetched list fails the minimum-keys sanity check.
     """
     if yaml is None:  # pragma: no cover
         log.warning(
@@ -60,10 +68,19 @@ def _fetch_scenarios_required_subkeys() -> list[str]:
     try:
         rules = yaml.safe_load(raw)
         subkeys = rules["scenarios"]["required_fields"]
+
         if not isinstance(subkeys, list) or not subkeys:
-            raise ValueError(f"unexpected required_fields value: {subkeys!r}")
+            raise ValueError(f"expected non-empty list, got: {subkeys!r}")
+
+        missing_minimum = _SCENARIOS_REQUIRED_SUBKEYS_MINIMUM - set(subkeys)
+        if missing_minimum:
+            raise ValueError(
+                f"fetched list is missing mandatory keys {missing_minimum}: {subkeys!r}"
+            )
+
         log.debug("scenarios.required_subkeys inferred from zeroth: %s", subkeys)
         return subkeys
+
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "Failed to parse zeroth rules/agent.yml (%s) — using fallback subkeys: %s",
