@@ -27,8 +27,7 @@ Exit codes:
 
 Adding a framework:
   instance checks: checks/frameworks/{name}.py  with run(repo, report)
-  zeroth checks:   checks/zeroth/{name}.py       with run(repo, report)
-  See checks/frameworks/README.yml for the full contract.
+  zeroth checks:   frameworks/{name}/checks.yml (no Python module)
 """
 
 import argparse
@@ -36,7 +35,9 @@ import importlib
 import sys
 from pathlib import Path
 
-from core import Report, ERROR, _gh_annotation
+import yaml
+
+from core import Report, ERROR, _gh_annotation, run_check
 from checks import agent
 
 
@@ -108,6 +109,46 @@ def discover_frameworks(repo: Path) -> list[str]:
     return sorted(d.name for d in frameworks_dir.iterdir() if d.is_dir())
 
 
+def _run_zeroth_checks_for_framework(repo: Path, framework: str, report: Report) -> None:
+    """Run zeroth-mode checks for a single framework.
+
+    Source of truth lives entirely in zeroth:
+      frameworks/{framework}/checks.yml
+
+    Structure:
+      sections:
+        - name: "label for report.section()"
+          checks:
+            - <check dict passed to run_check()>
+    """
+    checks_path = repo / "frameworks" / framework / "checks.yml"
+
+    if not checks_path.exists():
+        msg = (
+            f"zeroth checks for framework '{framework}' not yet declared. "
+            f"Add frameworks/{framework}/checks.yml to enable."
+        )
+        print(f"\n[giskard] WARNING: {msg}")
+        _gh_annotation("warning", f"giskard: {msg}")
+        return
+
+    try:
+        data = yaml.safe_load(checks_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as e:
+        msg = f"failed to parse frameworks/{framework}/checks.yml: {e}"
+        print(f"\n[giskard] ERROR: {msg}")
+        _gh_annotation("error", f"giskard: {msg}")
+        report.error(label=f"{framework}@zeroth — checks.yml parse error", file=str(checks_path), rule="rules/structure.yml")
+        return
+
+    sections = data.get("sections") or []
+    for section in sections:
+        name = section.get("name") or f"{framework}@zeroth — unnamed section"
+        report.section(name)
+        for check in section.get("checks") or []:
+            run_check(repo, check, report)
+
+
 def run(repo_path: str, framework: str = None, mode: str = "instance", github_token: str = None):
     repo = Path(repo_path).resolve()
     if not repo.is_dir():
@@ -130,16 +171,7 @@ def run(repo_path: str, framework: str = None, mode: str = "instance", github_to
                 print(f"[giskard] discovered frameworks: {', '.join(frameworks)}")
 
         for fw_name in frameworks:
-            fw = load_module("checks.zeroth", fw_name)
-            if fw is None:
-                msg = (
-                    f"zeroth checks for framework '{fw_name}' not yet implemented. "
-                    f"Add checks/zeroth/{fw_name}.py to enable."
-                )
-                print(f"\n[giskard] WARNING: {msg}")
-                _gh_annotation("warning", f"giskard: {msg}")
-            else:
-                fw.run(repo, report)
+            _run_zeroth_checks_for_framework(repo, fw_name, report)
 
     else:
         # instance mode: .agent.yml check + optional framework-specific checks.
