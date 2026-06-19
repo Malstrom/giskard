@@ -389,6 +389,108 @@ def proxy_scenario_no_forbidden_modules(repo: Path, check: dict) -> tuple:
     return len(violations) == 0, ""
 
 
+def proxy_scenarios_index_valid(repo: Path, check: dict) -> tuple:
+    """
+    Validates that a .scenarios.yml uses the index format.
+
+    Index format requirements:
+      - root key must be 'scenarios'
+      - value must be a non-empty list
+      - each entry must have: id (str), triggers (non-empty list), file (str)
+    """
+    file_path = check.get("file", ".scenarios.yml")
+    content = _read_file(repo, file_path)
+    if not content:
+        return False, f"{file_path} not found or empty"
+
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError as e:
+        return False, f"invalid YAML: {e}"
+
+    if not isinstance(parsed, dict):
+        return False, "root is not a mapping"
+
+    if "scenarios" not in parsed:
+        root_keys = list(parsed.keys())
+        return False, f"root key is '{root_keys[0] if root_keys else '?'}', expected 'scenarios'"
+
+    entries = parsed["scenarios"]
+    if not isinstance(entries, list) or len(entries) == 0:
+        return False, "'scenarios' must be a non-empty list"
+
+    violations = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            violations.append(f"entry[{i}] is not a mapping")
+            continue
+        missing_keys = [k for k in ("id", "triggers", "file") if k not in entry]
+        if missing_keys:
+            entry_id = entry.get("id", f"[{i}]")
+            violations.append(f"{entry_id}: missing {missing_keys}")
+            continue
+        if not isinstance(entry["triggers"], list) or len(entry["triggers"]) == 0:
+            violations.append(f"{entry['id']}: 'triggers' must be a non-empty list")
+
+    if violations:
+        for v in violations:
+            print(f"    {v}")
+        return False, f"{len(violations)} entry violation(s)"
+
+    return True, f"{len(entries)} scenario(s) valid"
+
+
+def proxy_scenarios_index_files_exist(repo: Path, check: dict) -> tuple:
+    """
+    For each entry in a .scenarios.yml index, verifies that the referenced
+    'file' exists. Paths starting with 'frameworks/' are resolved against
+    raw.githubusercontent.com/Malstrom/zeroth (zeroth repo).
+    All other paths are resolved relative to the local repo root.
+    """
+    file_path = check.get("file", ".scenarios.yml")
+    zeroth_ref = check.get("zeroth_ref", "main")
+    content = _read_file(repo, file_path)
+    if not content:
+        return None, f"{file_path} not found — skipped"
+
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return None, f"{file_path} invalid YAML — skipped"
+
+    if not isinstance(parsed, dict) or "scenarios" not in parsed:
+        return None, "not index format — skipped"
+
+    entries = parsed.get("scenarios") or []
+    if not isinstance(entries, list) or len(entries) == 0:
+        return None, "no entries — skipped"
+
+    missing = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        ref_file = entry.get("file", "")
+        if not ref_file:
+            missing.append(f"{entry.get('id', '?')}: no 'file' key")
+            continue
+
+        if ref_file.startswith("frameworks/"):
+            url = f"https://raw.githubusercontent.com/Malstrom/zeroth/{zeroth_ref}/{ref_file}"
+            content_remote = _fetch_url(url)
+            if not content_remote:
+                missing.append(ref_file)
+        else:
+            if not (repo / ref_file).exists():
+                missing.append(ref_file)
+
+    if missing:
+        for m in missing:
+            print(f"    missing: {m}")
+        return False, f"{len(missing)}/{len(entries)} file(s) missing"
+
+    return True, f"{len(entries)} file(s) found"
+
+
 def proxy_handler_present(repo: Path, check: dict) -> tuple:
     parsed = _parse_yaml(repo, ".agent.yml")
     h = parsed.get("handlers", {}) or {}
@@ -598,6 +700,8 @@ PROXY_REGISTRY = {
     "scenario_not_present": proxy_scenario_not_present,
     "scenario_input_sources": proxy_scenario_input_sources,
     "scenario_no_forbidden_modules": proxy_scenario_no_forbidden_modules,
+    "scenarios_index_valid": proxy_scenarios_index_valid,
+    "scenarios_index_files_exist": proxy_scenarios_index_files_exist,
     "handler_present": proxy_handler_present,
     "handler_has_key": proxy_handler_has_key,
     "text_search": proxy_text_search,
