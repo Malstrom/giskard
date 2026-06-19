@@ -78,6 +78,21 @@ STRUCTURE_CHECKS_BASE = [
     },
 ]
 
+SCENARIOS_CONTENT_CHECKS = [
+    {
+        "label": "frameworks/dojo/.scenarios.yml index format valid",
+        "proxy": "scenarios_index_valid",
+        "file": "frameworks/dojo/.scenarios.yml",
+        "rule": "rules/scenarios.yml",
+    },
+    {
+        "label": "frameworks/dojo/.scenarios.yml scenario files exist",
+        "proxy": "scenarios_index_files_exist",
+        "file": "frameworks/dojo/.scenarios.yml",
+        "rule": "rules/scenarios.yml",
+    },
+]
+
 
 def run(repo: Path, report: Report) -> None:
     report.section("dojo@zeroth — structure")
@@ -93,3 +108,7 @@ def run(repo: Path, report: Report) -> None:
         "required_files": required_templates,
         "rule": "dojo/structure.yml",
     }, report)
+
+    report.section("dojo@zeroth — scenarios")
+    for check in SCENARIOS_CONTENT_CHECKS:
+        run_check(repo, check, report)

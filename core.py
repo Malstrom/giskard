@@ -445,6 +445,104 @@ def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# scenarios index proxies
+# ---------------------------------------------------------------------------
+
+def proxy_scenarios_index_valid(repo: Path, check: dict) -> tuple:
+    """
+    Validate a .scenarios.yml that uses the index format.
+
+    check keys:
+      file  — path to the .scenarios.yml relative to repo root
+      rule  — (optional) zeroth rule reference for the report
+
+    Passes when:
+      - root key is 'scenarios'
+      - value is a non-empty list
+      - every entry is a dict with non-empty string 'id',
+        non-empty list 'triggers', and non-empty string 'file'
+    """
+    filepath = check["file"]
+    content = _read_file(repo, filepath)
+    if not content:
+        return False, f"{filepath} not found or empty"
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError as e:
+        return False, f"YAML parse error: {e}"
+
+    if not isinstance(parsed, dict) or "scenarios" not in parsed:
+        return False, f"root key must be 'scenarios', got: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}"
+
+    entries = parsed["scenarios"]
+    if not isinstance(entries, list) or len(entries) == 0:
+        return False, "'scenarios' must be a non-empty list"
+
+    violations = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            violations.append(f"entry[{i}] is not a dict")
+            continue
+        entry_id = entry.get("id")
+        triggers = entry.get("triggers")
+        file_ref = entry.get("file")
+        if not isinstance(entry_id, str) or not entry_id.strip():
+            violations.append(f"entry[{i}] missing or empty 'id'")
+        if not isinstance(triggers, list) or len(triggers) == 0:
+            violations.append(f"entry[{i}] (id={entry_id!r}) 'triggers' must be a non-empty list")
+        if not isinstance(file_ref, str) or not file_ref.strip():
+            violations.append(f"entry[{i}] (id={entry_id!r}) missing or empty 'file'")
+
+    if violations:
+        for v in violations:
+            print(f"    {v}")
+        return False, f"{len(violations)} violation(s)"
+
+    return True, f"{len(entries)} scenario(s) valid"
+
+
+def proxy_scenarios_index_files_exist(repo: Path, check: dict) -> tuple:
+    """
+    For every entry in a .scenarios.yml index, verify that the referenced
+    'file' path exists in the repo.
+
+    check keys:
+      file  — path to the .scenarios.yml relative to repo root
+      rule  — (optional) zeroth rule reference for the report
+    """
+    filepath = check["file"]
+    content = _read_file(repo, filepath)
+    if not content:
+        return None, f"{filepath} not found — skipped"
+    try:
+        parsed = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return None, f"{filepath} is not valid YAML — skipped"
+
+    entries = (parsed or {}).get("scenarios", [])
+    if not isinstance(entries, list):
+        return None, "'scenarios' is not a list — skipped"
+
+    missing = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        file_ref = entry.get("file", "")
+        if not file_ref:
+            continue
+        if not (repo / file_ref).exists():
+            missing.append(file_ref)
+
+    if missing:
+        for m in missing:
+            print(f"    missing scenario file: {m}")
+        return False, f"{len(missing)} file(s) missing"
+
+    checked = len([e for e in entries if isinstance(e, dict) and e.get("file")])
+    return True, f"{checked} file reference(s) exist"
+
+
+# ---------------------------------------------------------------------------
 # Cross-ref check proxy
 # ---------------------------------------------------------------------------
 
@@ -605,6 +703,8 @@ PROXY_REGISTRY = {
     "file_access_mode": proxy_file_access_mode,
     "write_ahead_rule": proxy_write_ahead_rule,
     "cross_ref_check": proxy_cross_ref_check,
+    "scenarios_index_valid": proxy_scenarios_index_valid,
+    "scenarios_index_files_exist": proxy_scenarios_index_files_exist,
 }
 
 
