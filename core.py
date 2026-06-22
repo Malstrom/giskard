@@ -559,6 +559,183 @@ def proxy_write_ahead_rule(repo: Path, check: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Playbook index consistency proxy
+# ---------------------------------------------------------------------------
+
+def proxy_playbook_index_consistent(repo: Path, check: dict) -> tuple:
+    """
+    Verifies that a playbook directory and its _index.yml are consistent.
+
+    check keys:
+      target        — directory path, e.g. "clients/acme/playbooks/" or "playbooks/"
+                      supports glob patterns like "clients/*/playbooks/"
+      is_client_dir — bool (default True for clients/*/playbooks/, False for root playbooks/)
+                      controls whether promoted_to_root validation is performed
+
+    Checks performed:
+      1. _index.yml exists in the directory — error if missing
+      2. Every *.yml file (excl. _index.yml) has a matching entry in _index.yml
+      3. Every entry in _index.yml references an existing file
+      4. Every entry has required keys: file, work_type, name, created, usage_count
+      5. Client dirs only: entries with promoted_to_root: true must have
+         a corresponding file in the root playbooks/ directory
+      6. Root dir only: entries must NOT have a promoted_to_root key
+
+    On failure, prints structured YAML-compatible output for AI repair workflow.
+    Returns (True, summary) | (False, summary) | (None, reason) if dir missing.
+    """
+    raw_target = check["target"].rstrip("/")
+
+    # Expand glob patterns (e.g. clients/*/playbooks)
+    target_dirs = sorted(repo.glob(raw_target)) if "*" in raw_target else [repo / raw_target]
+    target_dirs = [d for d in target_dirs if d.is_dir()]
+
+    if not target_dirs:
+        return None, f"no directories found matching '{raw_target}' — skipped"
+
+    # Determine mode: client dirs contain a parent slug, root dir is just "playbooks"
+    is_client_dir = check.get("is_client_dir", "playbooks" in raw_target and "clients" in raw_target)
+    root_playbooks_dir = repo / "playbooks"
+
+    # Required keys every index entry must have
+    REQUIRED_ENTRY_KEYS = {"file", "work_type", "name", "created", "usage_count"}
+    # Filename pattern: {work_type}_{descriptor}.yml
+    FILENAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*_[a-z][a-z0-9_]*\.yml$")
+
+    all_inconsistencies: dict[str, list] = {
+        "missing_from_index": [],
+        "missing_file": [],
+        "missing_required_keys": [],
+        "invalid_filename": [],
+        "broken_promotion": [],
+        "forbidden_key_in_root": [],
+    }
+
+    total_dirs = 0
+    total_files = 0
+
+    for target_dir in target_dirs:
+        total_dirs += 1
+        rel_dir = str(target_dir.relative_to(repo)) + "/"
+        index_path = target_dir / "_index.yml"
+
+        # Check 1: index file must exist
+        if not index_path.exists():
+            all_inconsistencies["missing_from_index"].append({
+                "_index.yml": "missing entirely",
+                "directory": rel_dir,
+            })
+            # Cannot proceed without index — report and continue to next dir
+            continue
+
+        try:
+            index_raw = yaml.safe_load(index_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as e:
+            all_inconsistencies["missing_from_index"].append({
+                "_index.yml": f"invalid YAML: {e}",
+                "directory": rel_dir,
+            })
+            continue
+
+        # Index may be a list of entries or a dict with an 'entries' key
+        if isinstance(index_raw, list):
+            index_entries = index_raw
+        elif isinstance(index_raw, dict):
+            index_entries = index_raw.get("entries", list(index_raw.values()))
+            if not isinstance(index_entries, list):
+                index_entries = []
+        else:
+            index_entries = []
+
+        # Build lookup: filename -> entry
+        index_by_file: dict[str, dict] = {}
+        for entry in index_entries:
+            if isinstance(entry, dict) and "file" in entry:
+                index_by_file[entry["file"]] = entry
+
+        # Scan actual playbook files
+        actual_files = sorted(
+            f.name for f in target_dir.iterdir()
+            if f.suffix == ".yml" and f.name != "_index.yml"
+        )
+        total_files += len(actual_files)
+
+        # Check 2: every file must be in the index
+        for fname in actual_files:
+            if fname not in index_by_file:
+                all_inconsistencies["missing_from_index"].append({
+                    "file": fname,
+                    "directory": rel_dir,
+                })
+
+        # Check 3, 4, 5, 6: validate each index entry
+        for fname, entry in index_by_file.items():
+            # 3: referenced file must exist
+            if not (target_dir / fname).exists():
+                all_inconsistencies["missing_file"].append({
+                    "entry": fname,
+                    "directory": rel_dir,
+                })
+
+            # 4: required keys
+            missing_keys = REQUIRED_ENTRY_KEYS - set(entry.keys())
+            if missing_keys:
+                all_inconsistencies["missing_required_keys"].append({
+                    "entry": fname,
+                    "directory": rel_dir,
+                    "missing_keys": sorted(missing_keys),
+                })
+
+            # 4b: filename pattern
+            if not FILENAME_PATTERN.match(fname):
+                all_inconsistencies["invalid_filename"].append({
+                    "entry": fname,
+                    "directory": rel_dir,
+                    "expected_pattern": "{work_type}_{descriptor}.yml",
+                })
+
+            # 5: client dirs — broken promotion
+            if is_client_dir and entry.get("promoted_to_root") is True:
+                root_file = root_playbooks_dir / fname
+                if not root_file.exists():
+                    all_inconsistencies["broken_promotion"].append({
+                        "client_playbook": rel_dir + fname,
+                        "expected_root": f"playbooks/{fname}",
+                        "status": "root_file_missing",
+                    })
+
+            # 6: root dirs — promoted_to_root must not appear
+            if not is_client_dir and "promoted_to_root" in entry:
+                all_inconsistencies["forbidden_key_in_root"].append({
+                    "entry": fname,
+                    "directory": rel_dir,
+                    "key": "promoted_to_root",
+                })
+
+    # Summarize
+    flat_issues = [
+        item
+        for items in all_inconsistencies.values()
+        for item in items
+    ]
+
+    if not flat_issues:
+        return True, f"{total_dirs} dir(s), {total_files} playbook(s) — index consistent"
+
+    # Print structured YAML for AI repair
+    print("    inconsistencies:")
+    for key, items in all_inconsistencies.items():
+        if items:
+            print(f"      {key}:")
+            for item in items:
+                lines = yaml.dump([item], default_flow_style=False).strip().splitlines()
+                for line in lines:
+                    print(f"        {line}")
+
+    return False, f"{len(flat_issues)} inconsistency/ies in {total_dirs} dir(s)"
+
+
+# ---------------------------------------------------------------------------
 # Cross-ref check proxy
 # ---------------------------------------------------------------------------
 
@@ -720,6 +897,7 @@ PROXY_REGISTRY = {
     "token_count": proxy_token_count,
     "file_access_mode": proxy_file_access_mode,
     "write_ahead_rule": proxy_write_ahead_rule,
+    "playbook_index_consistent": proxy_playbook_index_consistent,
     "cross_ref_check": proxy_cross_ref_check,
 }
 
