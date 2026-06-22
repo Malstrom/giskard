@@ -443,9 +443,17 @@ def proxy_scenarios_index_valid(repo: Path, check: dict) -> tuple:
 def proxy_scenarios_index_files_exist(repo: Path, check: dict) -> tuple:
     """
     For each entry in a .scenarios.yml index, verifies that the referenced
-    'file' exists. Paths starting with 'frameworks/' are resolved against
-    raw.githubusercontent.com/Malstrom/zeroth (zeroth repo).
-    All other paths are resolved relative to the local repo root.
+    'file' exists.
+
+    Resolution strategy for paths starting with 'frameworks/':
+      1. Check locally first (repo / ref_file). This handles the case where
+         zeroth itself is the repo under test (e.g. on a PR that adds new
+         scenario files — they exist locally but not yet on remote main).
+      2. Fall back to raw.githubusercontent.com/Malstrom/zeroth/{zeroth_ref}/
+         for instance repos (e.g. daneel_igor) that reference canonical files
+         hosted on zeroth.
+
+    All other paths are resolved relative to the local repo root only.
     """
     file_path = check.get("file", ".scenarios.yml")
     zeroth_ref = check.get("zeroth_ref", "main")
@@ -475,9 +483,13 @@ def proxy_scenarios_index_files_exist(repo: Path, check: dict) -> tuple:
             continue
 
         if ref_file.startswith("frameworks/"):
+            # Local-first: handles zeroth PRs where files exist on the branch
+            # but not yet on remote main.
+            if (repo / ref_file).exists():
+                continue
+            # Remote fallback: handles instance repos referencing zeroth canonical.
             url = f"https://raw.githubusercontent.com/Malstrom/zeroth/{zeroth_ref}/{ref_file}"
-            content_remote = _fetch_url(url)
-            if not content_remote:
+            if not _fetch_url(url):
                 missing.append(ref_file)
         else:
             if not (repo / ref_file).exists():
